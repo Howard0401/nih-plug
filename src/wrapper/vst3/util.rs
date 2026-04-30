@@ -1,13 +1,13 @@
+use phaselith_vst3_sys::interfaces::IUnknown;
+use phaselith_vst3_sys::vst::TChar;
+use phaselith_vst3_sys::ComInterface;
 use std::cmp;
 use std::ops::Deref;
-use vst3_sys::interfaces::IUnknown;
-use vst3_sys::vst::TChar;
-use vst3_sys::ComInterface;
 use widestring::U16CString;
 
 /// When `Plugin::MIDI_INPUT` is set to `MidiConfig::MidiCCs` or higher then we'll register 130*16
 /// additional parameters to handle MIDI CCs, channel pressure, and pitch bend, in that order.
-/// vst3-sys doesn't expose these constants.
+/// phaselith-vst3-sys doesn't expose these constants.
 pub const VST3_MIDI_CCS: u32 = 130;
 pub const VST3_MIDI_CHANNELS: u32 = 16;
 /// The number of parameters we'll need to register if the plugin accepts MIDI CCs.
@@ -61,8 +61,8 @@ pub fn u16strlcpy(dest: &mut [TChar], src: &str) {
 
 /// Send+Sync wrapper for these interface pointers.
 #[repr(transparent)]
-pub struct VstPtr<T: vst3_sys::ComInterface + ?Sized> {
-    ptr: vst3_sys::VstPtr<T>,
+pub struct VstPtr<T: phaselith_vst3_sys::ComInterface + ?Sized> {
+    ptr: phaselith_vst3_sys::VstPtr<T>,
 }
 
 /// The same as [`VstPtr`] with shared semnatics, but for objects we defined ourself since `VstPtr`
@@ -73,7 +73,7 @@ pub struct ObjectPtr<T: IUnknown> {
 }
 
 impl<T: ComInterface + ?Sized> Deref for VstPtr<T> {
-    type Target = vst3_sys::VstPtr<T>;
+    type Target = phaselith_vst3_sys::VstPtr<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.ptr
@@ -88,8 +88,10 @@ impl<T: IUnknown> Deref for ObjectPtr<T> {
     }
 }
 
-impl<T: vst3_sys::ComInterface + ?Sized> From<vst3_sys::VstPtr<T>> for VstPtr<T> {
-    fn from(ptr: vst3_sys::VstPtr<T>) -> Self {
+impl<T: phaselith_vst3_sys::ComInterface + ?Sized> From<phaselith_vst3_sys::VstPtr<T>>
+    for VstPtr<T>
+{
+    fn from(ptr: phaselith_vst3_sys::VstPtr<T>) -> Self {
         Self { ptr }
     }
 }

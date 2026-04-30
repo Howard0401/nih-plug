@@ -1,14 +1,17 @@
 use atomic_float::AtomicF32;
 use parking_lot::{Mutex, RwLock};
+use phaselith_vst3_sys::base::{
+    kInvalidArgument, kNotImplemented, kResultFalse, kResultOk, tresult, TBool,
+};
+use phaselith_vst3_sys::compat::gui::{IPlugFrame, IPlugView, IPlugViewContentScaleSupport};
+use phaselith_vst3_sys::gui::ViewRect;
+use phaselith_vst3_sys::utils::SharedVstPtr;
+use phaselith_vst3_sys::VST3;
 use std::any::Any;
 use std::ffi::{c_void, CStr};
 use std::mem;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use vst3_sys::base::{kInvalidArgument, kNotImplemented, kResultFalse, kResultOk, tresult, TBool};
-use vst3_sys::gui::{IPlugFrame, IPlugView, IPlugViewContentScaleSupport, ViewRect};
-use vst3_sys::utils::SharedVstPtr;
-use vst3_sys::VST3;
 
 use super::inner::{Task, WrapperInner};
 use super::util::{ObjectPtr, VstPtr};
@@ -16,19 +19,19 @@ use crate::plugin::vst3::Vst3Plugin;
 use crate::prelude::{Editor, ParentWindowHandle};
 
 // Alias needed for the VST3 attribute macro
-use vst3_sys as vst3_com;
+use phaselith_vst3_sys as vst3_com;
 
 // Thanks for putting this behind a platform-specific ifdef...
-// NOTE: This should also be used on the BSDs, but vst3-sys exposes these interfaces only for Linux
+// NOTE: This should also be used on the BSDs, but phaselith-vst3-sys exposes these interfaces only for Linux
 #[cfg(target_os = "linux")]
 use {
     crate::event_loop::{EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY},
     crossbeam::queue::ArrayQueue,
     libc,
-    vst3_sys::gui::linux::{FileDescriptor, IEventHandler, IRunLoop},
+    phaselith_vst3_sys::gui::linux::{FileDescriptor, IEventHandler, IRunLoop},
 };
 
-// Window handle type constants missing from vst3-sys
+// Window handle type constants missing from phaselith-vst3-sys
 #[allow(unused)]
 const VST3_PLATFORM_HWND: &str = "HWND";
 #[allow(unused)]
@@ -40,7 +43,7 @@ const VST3_PLATFORM_UIVIEW: &str = "UIView";
 #[allow(unused)]
 const VST3_PLATFORM_X11_WINDOW: &str = "X11EmbedWindowID";
 
-/// FIXME: vst3-sys does not allow you to conditionally define fields with #[cfg()], so this is a
+/// FIXME: phaselith-vst3-sys does not allow you to conditionally define fields with #[cfg()], so this is a
 ///        workaround to define the field outside of the struct
 #[cfg(target_os = "linux")]
 struct RunLoopEventHandlerWrapper<P: Vst3Plugin>(RwLock<Option<Box<RunLoopEventHandler<P>>>>);
@@ -59,7 +62,7 @@ pub(crate) struct WrapperView<P: Vst3Plugin> {
     plug_frame: RwLock<Option<VstPtr<dyn IPlugFrame>>>,
     /// Allows handling events events on the host's GUI thread when using Linux. Needed because
     /// otherwise REAPER doesn't like us very much. The event handler could be implemented directly
-    /// on this object but vst3-sys does not let us conditionally implement interfaces.
+    /// on this object but phaselith-vst3-sys does not let us conditionally implement interfaces.
     run_loop_event_handler: RunLoopEventHandlerWrapper<P>,
 
     /// The DPI scaling factor as passed to the [IPlugViewContentScaleSupport::set_scale_factor()]
@@ -70,7 +73,7 @@ pub(crate) struct WrapperView<P: Vst3Plugin> {
 }
 
 /// Allow handling tasks on the host's GUI thread on Linux. This doesn't need to be a separate
-/// struct, but vst3-sys does not let us implement interfaces conditionally and the interface is
+/// struct, but phaselith-vst3-sys does not let us implement interfaces conditionally and the interface is
 /// only exposed when compiling on Linux. The struct will register itself when calling
 /// [`RunLoopEventHandler::new()`] and it will unregister itself when it gets dropped.
 #[cfg(target_os = "linux")]
@@ -203,7 +206,7 @@ impl<P: Vst3Plugin> RunLoopEventHandler<P> {
             ArrayQueue::new(TASK_QUEUE_CAPACITY),
         );
 
-        // vst3-sys provides no way to convert to a SharedVstPtr, so, uh, yeah. These are pointers
+        // phaselith-vst3-sys provides no way to convert to a SharedVstPtr, so, uh, yeah. These are pointers
         // to vtable poitners.
         let event_handler: SharedVstPtr<dyn IEventHandler> =
             unsafe { mem::transmute(&handler.__ieventhandlervptr as *const *const _) };
@@ -246,7 +249,10 @@ impl<P: Vst3Plugin> RunLoopEventHandler<P> {
 
 impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_X11_WINDOW => kResultOk,
@@ -258,7 +264,10 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     }
 
     #[cfg(target_os = "macos")]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_NSVIEW => kResultOk,
@@ -270,7 +279,10 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     }
 
     #[cfg(target_os = "windows")]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_HWND => kResultOk,
@@ -281,7 +293,11 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
         }
     }
 
-    unsafe fn attached(&self, parent: *mut c_void, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn attached(
+        &self,
+        parent: *mut c_void,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let mut editor_handle = self.editor_handle.write();
         if editor_handle.is_none() {
             let type_ = CStr::from_ptr(type_);
@@ -338,7 +354,7 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
 
     unsafe fn on_key_down(
         &self,
-        _key: vst3_sys::base::char16,
+        _key: phaselith_vst3_sys::base::char16,
         _key_code: i16,
         _modifiers: i16,
     ) -> tresult {
@@ -347,7 +363,7 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
 
     unsafe fn on_key_up(
         &self,
-        _key: vst3_sys::base::char16,
+        _key: phaselith_vst3_sys::base::char16,
         _key_code: i16,
         _modifiers: i16,
     ) -> tresult {

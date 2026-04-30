@@ -3579,11 +3579,11 @@ dependencies = [
  "nih_plug_derive",
  "objc",
  "parking_lot 0.12.3",
+ "phaselith-vst3-sys",
  "raw-window-handle 0.5.2",
  "rtrb",
  "serde",
  "serde_json",
- "vst3-sys",
  "widestring",
  "windows 0.44.0",
  "zstd",
@@ -4312,6 +4312,24 @@ name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
+
+[[package]]
+name = "phaselith-vst3-com-macros"
+version = "0.1.0"
+source = "git+https://github.com/Howard0401/phaselith-vst3-sys.git?rev=6da66c257751b4d2e998dbb51e7dc4f3f229cb40#6da66c257751b4d2e998dbb51e7dc4f3f229cb40"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
+name = "phaselith-vst3-sys"
+version = "0.1.0"
+source = "git+https://github.com/Howard0401/phaselith-vst3-sys.git?rev=6da66c257751b4d2e998dbb51e7dc4f3f229cb40#6da66c257751b4d2e998dbb51e7dc4f3f229cb40"
+dependencies = [
+ "phaselith-vst3-com-macros",
+]
 
 [[package]]
 name = "phf"
@@ -6032,43 +6050,6 @@ dependencies = [
  "web-sys",
  "winapi",
  "winit 0.28.7",
-]
-
-[[package]]
-name = "vst3-com"
-version = "0.1.0"
-source = "git+https://github.com/robbert-vdh/vst3-sys.git?branch=fix/drop-box-from-raw#b3ff4d775940f5b476b9d1cca02a90e07e1922a2"
-dependencies = [
- "vst3-com-macros",
-]
-
-[[package]]
-name = "vst3-com-macros"
-version = "0.2.0"
-source = "git+https://github.com/robbert-vdh/vst3-sys.git?branch=fix/drop-box-from-raw#b3ff4d775940f5b476b9d1cca02a90e07e1922a2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
- "vst3-com-macros-support",
-]
-
-[[package]]
-name = "vst3-com-macros-support"
-version = "0.2.0"
-source = "git+https://github.com/robbert-vdh/vst3-sys.git?branch=fix/drop-box-from-raw#b3ff4d775940f5b476b9d1cca02a90e07e1922a2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "vst3-sys"
-version = "0.1.0"
-source = "git+https://github.com/robbert-vdh/vst3-sys.git?branch=fix/drop-box-from-raw#b3ff4d775940f5b476b9d1cca02a90e07e1922a2"
-dependencies = [
- "vst3-com",
 ]
 
 [[package]]

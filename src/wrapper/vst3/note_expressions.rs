@@ -1,7 +1,7 @@
 //! Special handling for note expressions, because VST3 makes this a lot more complicated than it
 //! needs to be. We only support the predefined expressions.
 
-use vst3_sys::vst::{NoteExpressionValueEvent, NoteOnEvent};
+use phaselith_vst3_sys::vst::{NoteExpressionValueEvent, NoteOnEvent};
 
 use crate::prelude::{NoteEvent, SysExMessage};
 

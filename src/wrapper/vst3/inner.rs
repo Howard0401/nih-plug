@@ -2,12 +2,12 @@ use atomic_refcell::AtomicRefCell;
 use crossbeam::atomic::AtomicCell;
 use crossbeam::channel::{self, SendTimeoutError};
 use parking_lot::{Mutex, RwLock};
+use phaselith_vst3_sys::base::{kInvalidArgument, kResultOk, tresult};
+use phaselith_vst3_sys::vst::{IComponentHandler, RestartFlags};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use vst3_sys::base::{kInvalidArgument, kResultOk, tresult};
-use vst3_sys::vst::{IComponentHandler, RestartFlags};
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use super::note_expressions::NoteExpressionController;
@@ -152,7 +152,7 @@ pub enum Task<P: Plugin> {
     /// since the task will be created from the audio thread.
     ParameterValueChanged(u32, f32),
     /// Trigger a restart with the given restart flags. This is a bit set of the flags from
-    /// [`vst3_sys::vst::RestartFlags`].
+    /// [`phaselith_vst3_sys::vst::RestartFlags`].
     TriggerRestart(i32),
     /// Request the editor to be resized according to its current size. Right now there is no way to
     /// handle "denied resize" requests yet.
