@@ -1,3 +1,16 @@
+use phaselith_vst3_sys::base::{
+    kInvalidArgument, kNoInterface, kResultFalse, kResultOk, tresult, TBool,
+};
+use phaselith_vst3_sys::base::{IBStream, IPluginBase};
+use phaselith_vst3_sys::utils::SharedVstPtr;
+use phaselith_vst3_sys::vst::{
+    kNoParamId, kNoParentUnitId, kNoProgramListId, kRootUnitId, Event, EventTypes, IAudioProcessor,
+    IComponent, IEditController, IEventList, IMidiMapping, INoteExpressionController,
+    IParamValueQueue, IParameterChanges, IProcessContextRequirements, IUnitInfo,
+    LegacyMidiCCOutEvent, NoteExpressionTypeInfo, NoteExpressionValueDescription, NoteOffEvent,
+    NoteOnEvent, ParameterFlags, PolyPressureEvent, ProgramListInfo, TChar, UnitInfo,
+};
+use phaselith_vst3_sys::VST3;
 use std::borrow::Borrow;
 use std::ffi::c_void;
 use std::mem::{self, MaybeUninit};
@@ -6,17 +19,6 @@ use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use vst3_com::vst::{DataEvent, IProcessContextRequirementsFlags, ProcessModes};
-use vst3_sys::base::{kInvalidArgument, kNoInterface, kResultFalse, kResultOk, tresult, TBool};
-use vst3_sys::base::{IBStream, IPluginBase};
-use vst3_sys::utils::SharedVstPtr;
-use vst3_sys::vst::{
-    kNoParamId, kNoParentUnitId, kNoProgramListId, kRootUnitId, Event, EventTypes, IAudioProcessor,
-    IComponent, IEditController, IEventList, IMidiMapping, INoteExpressionController,
-    IParamValueQueue, IParameterChanges, IProcessContextRequirements, IUnitInfo,
-    LegacyMidiCCOutEvent, NoteExpressionTypeInfo, NoteExpressionValueDescription, NoteOffEvent,
-    NoteOnEvent, ParameterFlags, PolyPressureEvent, ProgramListInfo, TChar, UnitInfo,
-};
-use vst3_sys::VST3;
 use widestring::U16CStr;
 
 use super::inner::{ProcessEvent, WrapperInner};
@@ -36,7 +38,7 @@ use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
 use crate::wrapper::util::{clamp_input_event_timing, clamp_output_event_timing, process_wrapper};
 
 // Alias needed for the VST3 attribute macro
-use vst3_sys as vst3_com;
+use phaselith_vst3_sys as vst3_com;
 
 #[VST3(implements(
     IComponent,
@@ -75,12 +77,12 @@ impl<P: Vst3Plugin> IPluginBase for Wrapper<P> {
 }
 
 impl<P: Vst3Plugin> IComponent for Wrapper<P> {
-    unsafe fn get_controller_class_id(&self, _tuid: *mut vst3_sys::IID) -> tresult {
+    unsafe fn get_controller_class_id(&self, _tuid: *mut phaselith_vst3_sys::IID) -> tresult {
         // We won't separate the edit controller to keep the implementation a bit smaller
         kNoInterface
     }
 
-    unsafe fn set_io_mode(&self, _mode: vst3_sys::vst::IoMode) -> tresult {
+    unsafe fn set_io_mode(&self, _mode: phaselith_vst3_sys::vst::IoMode) -> tresult {
         // Not quite sure what the point of this is when the processing setup also receives similar
         // information
         kResultOk
@@ -88,16 +90,16 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
     unsafe fn get_bus_count(
         &self,
-        type_: vst3_sys::vst::MediaType,
-        dir: vst3_sys::vst::BusDirection,
+        type_: phaselith_vst3_sys::vst::MediaType,
+        dir: phaselith_vst3_sys::vst::BusDirection,
     ) -> i32 {
         let current_audio_io_layout = self.inner.current_audio_io_layout.load();
 
         // A plugin has a main input and output bus if the default number of channels is non-zero,
         // and a plugin can also have auxiliary input and output busses
         match type_ {
-            x if x == vst3_sys::vst::MediaTypes::kAudio as i32
-                && dir == vst3_sys::vst::BusDirections::kInput as i32 =>
+            x if x == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                && dir == phaselith_vst3_sys::vst::BusDirections::kInput as i32 =>
             {
                 let main_busses = if current_audio_io_layout.main_input_channels.is_some() {
                     1
@@ -108,8 +110,8 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
                 main_busses + aux_busses
             }
-            x if x == vst3_sys::vst::MediaTypes::kAudio as i32
-                && dir == vst3_sys::vst::BusDirections::kOutput as i32 =>
+            x if x == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                && dir == phaselith_vst3_sys::vst::BusDirections::kOutput as i32 =>
             {
                 let main_busses = if current_audio_io_layout.main_output_channels.is_some() {
                     1
@@ -120,14 +122,14 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
                 main_busses + aux_busses
             }
-            x if x == vst3_sys::vst::MediaTypes::kEvent as i32
-                && dir == vst3_sys::vst::BusDirections::kInput as i32
+            x if x == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                && dir == phaselith_vst3_sys::vst::BusDirections::kInput as i32
                 && P::MIDI_INPUT >= MidiConfig::Basic =>
             {
                 1
             }
-            x if x == vst3_sys::vst::MediaTypes::kEvent as i32
-                && dir == vst3_sys::vst::BusDirections::kOutput as i32
+            x if x == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                && dir == phaselith_vst3_sys::vst::BusDirections::kOutput as i32
                 && P::MIDI_OUTPUT >= MidiConfig::Basic =>
             {
                 1
@@ -138,10 +140,10 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
     unsafe fn get_bus_info(
         &self,
-        type_: vst3_sys::vst::MediaType,
-        dir: vst3_sys::vst::BusDirection,
+        type_: phaselith_vst3_sys::vst::MediaType,
+        dir: phaselith_vst3_sys::vst::BusDirection,
         index: i32,
-        info: *mut vst3_sys::vst::BusInfo,
+        info: *mut phaselith_vst3_sys::vst::BusInfo,
     ) -> tresult {
         check_null_ptr!(info);
 
@@ -149,28 +151,28 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
         match (type_, dir, index) {
             (t, d, _)
-                if t == vst3_sys::vst::MediaTypes::kAudio as i32
-                    && d == vst3_sys::vst::BusDirections::kInput as i32 =>
+                if t == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kInput as i32 =>
             {
                 *info = mem::zeroed();
 
                 let info = &mut *info;
-                info.media_type = vst3_sys::vst::MediaTypes::kAudio as i32;
+                info.media_type = phaselith_vst3_sys::vst::MediaTypes::kAudio as i32;
                 info.direction = dir;
-                info.flags = vst3_sys::vst::BusFlags::kDefaultActive as u32;
+                info.flags = phaselith_vst3_sys::vst::BusFlags::kDefaultActive as u32;
 
                 let has_main_input = current_audio_io_layout.main_input_channels.is_some();
                 let aux_input_start_idx = if has_main_input { 1 } else { 0 };
                 let aux_input_idx = (index - aux_input_start_idx).max(0) as usize;
                 if index == 0 && has_main_input {
-                    info.bus_type = vst3_sys::vst::BusTypes::kMain as i32;
+                    info.bus_type = phaselith_vst3_sys::vst::BusTypes::kMain as i32;
                     info.channel_count =
                         current_audio_io_layout.main_input_channels.unwrap().get() as i32;
                     u16strlcpy(&mut info.name, &current_audio_io_layout.main_input_name());
 
                     kResultOk
                 } else if aux_input_idx < current_audio_io_layout.aux_input_ports.len() {
-                    info.bus_type = vst3_sys::vst::BusTypes::kAux as i32;
+                    info.bus_type = phaselith_vst3_sys::vst::BusTypes::kAux as i32;
                     info.channel_count =
                         current_audio_io_layout.aux_input_ports[aux_input_idx].get() as i32;
                     u16strlcpy(
@@ -186,21 +188,21 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
                 }
             }
             (t, d, _)
-                if t == vst3_sys::vst::MediaTypes::kAudio as i32
-                    && d == vst3_sys::vst::BusDirections::kOutput as i32 =>
+                if t == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kOutput as i32 =>
             {
                 *info = mem::zeroed();
 
                 let info = &mut *info;
-                info.media_type = vst3_sys::vst::MediaTypes::kAudio as i32;
+                info.media_type = phaselith_vst3_sys::vst::MediaTypes::kAudio as i32;
                 info.direction = dir;
-                info.flags = vst3_sys::vst::BusFlags::kDefaultActive as u32;
+                info.flags = phaselith_vst3_sys::vst::BusFlags::kDefaultActive as u32;
 
                 let has_main_output = current_audio_io_layout.main_output_channels.is_some();
                 let aux_output_start_idx = if has_main_output { 1 } else { 0 };
                 let aux_output_idx = (index - aux_output_start_idx).max(0) as usize;
                 if index == 0 && has_main_output {
-                    info.bus_type = vst3_sys::vst::BusTypes::kMain as i32;
+                    info.bus_type = phaselith_vst3_sys::vst::BusTypes::kMain as i32;
                     // NOTE: See above, this becomes a 0 channel output if the plugin doesn't have a
                     //       main output
                     info.channel_count = current_audio_io_layout
@@ -211,7 +213,7 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
                     kResultOk
                 } else if aux_output_idx < current_audio_io_layout.aux_output_ports.len() {
-                    info.bus_type = vst3_sys::vst::BusTypes::kAux as i32;
+                    info.bus_type = phaselith_vst3_sys::vst::BusTypes::kAux as i32;
                     info.channel_count =
                         current_audio_io_layout.aux_output_ports[aux_output_idx].get() as i32;
                     u16strlcpy(
@@ -227,35 +229,35 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
                 }
             }
             (t, d, 0)
-                if t == vst3_sys::vst::MediaTypes::kEvent as i32
-                    && d == vst3_sys::vst::BusDirections::kInput as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kInput as i32
                     && P::MIDI_INPUT >= MidiConfig::Basic =>
             {
                 *info = mem::zeroed();
 
                 let info = &mut *info;
-                info.media_type = vst3_sys::vst::MediaTypes::kEvent as i32;
-                info.direction = vst3_sys::vst::BusDirections::kInput as i32;
+                info.media_type = phaselith_vst3_sys::vst::MediaTypes::kEvent as i32;
+                info.direction = phaselith_vst3_sys::vst::BusDirections::kInput as i32;
                 info.channel_count = 16;
                 u16strlcpy(&mut info.name, "Note Input");
-                info.bus_type = vst3_sys::vst::BusTypes::kMain as i32;
-                info.flags = vst3_sys::vst::BusFlags::kDefaultActive as u32;
+                info.bus_type = phaselith_vst3_sys::vst::BusTypes::kMain as i32;
+                info.flags = phaselith_vst3_sys::vst::BusFlags::kDefaultActive as u32;
                 kResultOk
             }
             (t, d, 0)
-                if t == vst3_sys::vst::MediaTypes::kEvent as i32
-                    && d == vst3_sys::vst::BusDirections::kOutput as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kOutput as i32
                     && P::MIDI_OUTPUT >= MidiConfig::Basic =>
             {
                 *info = mem::zeroed();
 
                 let info = &mut *info;
-                info.media_type = vst3_sys::vst::MediaTypes::kEvent as i32;
-                info.direction = vst3_sys::vst::BusDirections::kOutput as i32;
+                info.media_type = phaselith_vst3_sys::vst::MediaTypes::kEvent as i32;
+                info.direction = phaselith_vst3_sys::vst::BusDirections::kOutput as i32;
                 info.channel_count = 16;
                 u16strlcpy(&mut info.name, "Note Output");
-                info.bus_type = vst3_sys::vst::BusTypes::kMain as i32;
-                info.flags = vst3_sys::vst::BusFlags::kDefaultActive as u32;
+                info.bus_type = phaselith_vst3_sys::vst::BusTypes::kMain as i32;
+                info.flags = phaselith_vst3_sys::vst::BusFlags::kDefaultActive as u32;
                 kResultOk
             }
             _ => kInvalidArgument,
@@ -264,8 +266,8 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
     unsafe fn get_routing_info(
         &self,
-        in_info: *mut vst3_sys::vst::RoutingInfo,
-        out_info: *mut vst3_sys::vst::RoutingInfo,
+        in_info: *mut phaselith_vst3_sys::vst::RoutingInfo,
+        out_info: *mut phaselith_vst3_sys::vst::RoutingInfo,
     ) -> tresult {
         check_null_ptr!(in_info, out_info);
 
@@ -277,23 +279,23 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
         let out_info = &mut *out_info;
         match (in_info.media_type, in_info.bus_index) {
             (t, 0)
-                if t == vst3_sys::vst::MediaTypes::kAudio as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
                     // We only have an IO pair when the plugin has both a main input and a main output
                     && current_audio_io_layout.main_input_channels.is_some()
                     && current_audio_io_layout.main_output_channels.is_some() =>
             {
-                out_info.media_type = vst3_sys::vst::MediaTypes::kAudio as i32;
+                out_info.media_type = phaselith_vst3_sys::vst::MediaTypes::kAudio as i32;
                 out_info.bus_index = in_info.bus_index;
                 out_info.channel = in_info.channel;
 
                 kResultOk
             }
             (t, 0)
-                if t == vst3_sys::vst::MediaTypes::kEvent as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
                     && P::MIDI_INPUT >= MidiConfig::Basic
                     && P::MIDI_OUTPUT >= MidiConfig::Basic =>
             {
-                out_info.media_type = vst3_sys::vst::MediaTypes::kEvent as i32;
+                out_info.media_type = phaselith_vst3_sys::vst::MediaTypes::kEvent as i32;
                 out_info.bus_index = in_info.bus_index;
                 out_info.channel = in_info.channel;
 
@@ -305,10 +307,10 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
 
     unsafe fn activate_bus(
         &self,
-        type_: vst3_sys::vst::MediaType,
-        dir: vst3_sys::vst::BusDirection,
+        type_: phaselith_vst3_sys::vst::MediaType,
+        dir: phaselith_vst3_sys::vst::BusDirection,
         index: i32,
-        _state: vst3_sys::base::TBool,
+        _state: phaselith_vst3_sys::base::TBool,
     ) -> tresult {
         let current_audio_io_layout = self.inner.current_audio_io_layout.load();
 
@@ -316,8 +318,8 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
         // that
         match (type_, dir, index) {
             (t, d, _)
-                if t == vst3_sys::vst::MediaTypes::kAudio as i32
-                    && d == vst3_sys::vst::BusDirections::kInput as i32 =>
+                if t == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kInput as i32 =>
             {
                 let main_busses = if current_audio_io_layout.main_input_channels.is_some() {
                     1
@@ -333,8 +335,8 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
                 }
             }
             (t, d, _)
-                if t == vst3_sys::vst::MediaTypes::kAudio as i32
-                    && d == vst3_sys::vst::BusDirections::kOutput as i32 =>
+                if t == phaselith_vst3_sys::vst::MediaTypes::kAudio as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kOutput as i32 =>
             {
                 let main_busses = if current_audio_io_layout.main_output_channels.is_some() {
                     1
@@ -350,15 +352,15 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
                 }
             }
             (t, d, 0)
-                if t == vst3_sys::vst::MediaTypes::kEvent as i32
-                    && d == vst3_sys::vst::BusDirections::kInput as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kInput as i32
                     && P::MIDI_INPUT >= MidiConfig::Basic =>
             {
                 kResultOk
             }
             (t, d, 0)
-                if t == vst3_sys::vst::MediaTypes::kEvent as i32
-                    && d == vst3_sys::vst::BusDirections::kOutput as i32
+                if t == phaselith_vst3_sys::vst::MediaTypes::kEvent as i32
+                    && d == phaselith_vst3_sys::vst::BusDirections::kOutput as i32
                     && P::MIDI_OUTPUT >= MidiConfig::Basic =>
             {
                 kResultOk
@@ -420,10 +422,10 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
         let mut current_pos = 0;
         let mut eof_pos = 0;
         if state.tell(&mut current_pos) != kResultOk
-            || state.seek(0, vst3_sys::base::kIBSeekEnd, &mut eof_pos) != kResultOk
+            || state.seek(0, phaselith_vst3_sys::base::kIBSeekEnd, &mut eof_pos) != kResultOk
             || state.seek(
                 current_pos,
-                vst3_sys::base::kIBSeekSet,
+                phaselith_vst3_sys::base::kIBSeekSet,
                 std::ptr::null_mut(),
             ) != kResultOk
         {
@@ -525,7 +527,7 @@ impl<P: Vst3Plugin> IEditController for Wrapper<P> {
     unsafe fn get_parameter_info(
         &self,
         param_index: i32,
-        info: *mut vst3_sys::vst::ParameterInfo,
+        info: *mut phaselith_vst3_sys::vst::ParameterInfo,
     ) -> tresult {
         check_null_ptr!(info);
 
@@ -683,19 +685,19 @@ impl<P: Vst3Plugin> IEditController for Wrapper<P> {
 
     unsafe fn set_component_handler(
         &self,
-        handler: SharedVstPtr<dyn vst3_sys::vst::IComponentHandler>,
+        handler: SharedVstPtr<dyn phaselith_vst3_sys::vst::IComponentHandler>,
     ) -> tresult {
         *self.inner.component_handler.borrow_mut() = handler.upgrade().map(VstPtr::from);
 
         kResultOk
     }
 
-    unsafe fn create_view(&self, _name: vst3_sys::base::FIDString) -> *mut c_void {
+    unsafe fn create_view(&self, _name: phaselith_vst3_sys::base::FIDString) -> *mut c_void {
         // Without specialization this is the least redundant way to check if the plugin has an
         // editor. The default implementation returns a None here.
         match self.inner.editor.borrow().as_ref() {
             Some(editor) => Box::into_raw(WrapperView::new(self.inner.clone(), editor.clone()))
-                as *mut vst3_sys::c_void,
+                as *mut phaselith_vst3_sys::c_void,
             None => std::ptr::null_mut(),
         }
     }
@@ -704,9 +706,9 @@ impl<P: Vst3Plugin> IEditController for Wrapper<P> {
 impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     unsafe fn set_bus_arrangements(
         &self,
-        inputs: *mut vst3_sys::vst::SpeakerArrangement,
+        inputs: *mut phaselith_vst3_sys::vst::SpeakerArrangement,
         num_ins: i32,
-        outputs: *mut vst3_sys::vst::SpeakerArrangement,
+        outputs: *mut phaselith_vst3_sys::vst::SpeakerArrangement,
         num_outs: i32,
     ) -> tresult {
         check_null_ptr!(inputs, outputs);
@@ -791,20 +793,20 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
 
     unsafe fn get_bus_arrangement(
         &self,
-        dir: vst3_sys::vst::BusDirection,
+        dir: phaselith_vst3_sys::vst::BusDirection,
         index: i32,
-        arr: *mut vst3_sys::vst::SpeakerArrangement,
+        arr: *mut phaselith_vst3_sys::vst::SpeakerArrangement,
     ) -> tresult {
         check_null_ptr!(arr);
 
         let channel_count_to_map = |count| match count {
-            0 => vst3_sys::vst::kEmpty,
-            1 => vst3_sys::vst::kMono,
-            2 => vst3_sys::vst::kStereo,
-            5 => vst3_sys::vst::k50,
-            6 => vst3_sys::vst::k51,
-            7 => vst3_sys::vst::k70Cine,
-            8 => vst3_sys::vst::k71Cine,
+            0 => phaselith_vst3_sys::vst::kEmpty,
+            1 => phaselith_vst3_sys::vst::kMono,
+            2 => phaselith_vst3_sys::vst::kStereo,
+            5 => phaselith_vst3_sys::vst::k50,
+            6 => phaselith_vst3_sys::vst::k51,
+            7 => phaselith_vst3_sys::vst::k70Cine,
+            8 => phaselith_vst3_sys::vst::k71Cine,
             n => {
                 nih_debug_assert_failure!(
                     "No defined layout for {} channels, making something up on the spot...",
@@ -815,7 +817,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
         };
 
         let current_audio_io_layout = self.inner.current_audio_io_layout.load();
-        let num_channels = if dir == vst3_sys::vst::BusDirections::kInput as i32 {
+        let num_channels = if dir == phaselith_vst3_sys::vst::BusDirections::kInput as i32 {
             let has_main_input = current_audio_io_layout.main_input_channels.is_some();
             let aux_input_start_idx = if has_main_input { 1 } else { 0 };
             let aux_input_idx = (index - aux_input_start_idx).max(0) as usize;
@@ -826,7 +828,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
             } else {
                 return kInvalidArgument;
             }
-        } else if dir == vst3_sys::vst::BusDirections::kOutput as i32 {
+        } else if dir == phaselith_vst3_sys::vst::BusDirections::kOutput as i32 {
             let has_main_output = current_audio_io_layout.main_output_channels.is_some();
             let aux_output_start_idx = if has_main_output { 1 } else { 0 };
             let aux_output_idx = (index - aux_output_start_idx).max(0) as usize;
@@ -849,7 +851,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     }
 
     unsafe fn can_process_sample_size(&self, symbolic_sample_size: i32) -> tresult {
-        if symbolic_sample_size == vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32 {
+        if symbolic_sample_size == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32 {
             kResultOk
         } else {
             kResultFalse
@@ -860,14 +862,17 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
         self.inner.current_latency.load(Ordering::SeqCst)
     }
 
-    unsafe fn setup_processing(&self, setup: *const vst3_sys::vst::ProcessSetup) -> tresult {
+    unsafe fn setup_processing(
+        &self,
+        setup: *const phaselith_vst3_sys::vst::ProcessSetup,
+    ) -> tresult {
         check_null_ptr!(setup);
 
         // There's no special handling for offline processing at the moment
         let setup = &*setup;
         nih_debug_assert_eq!(
             setup.symbolic_sample_size,
-            vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
+            phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
         );
 
         // This is needed when activating the plugin and when restoring state
@@ -930,7 +935,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
 
     // Clippy doesn't understand our `event_start_idx`
     #[allow(clippy::mut_range_bound)]
-    unsafe fn process(&self, data: *mut vst3_sys::vst::ProcessData) -> tresult {
+    unsafe fn process(&self, data: *mut phaselith_vst3_sys::vst::ProcessData) -> tresult {
         check_null_ptr!(data);
 
         // Panic on allocations if the `assert_process_allocs` feature has been enabled, and make
@@ -948,7 +953,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
             nih_debug_assert!(data.num_inputs >= 0 && data.num_outputs >= 0);
             nih_debug_assert_eq!(
                 data.symbolic_sample_size,
-                vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
+                phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
             );
             nih_debug_assert!(data.num_samples >= 0);
 
@@ -1335,7 +1340,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                     if !data.context.is_null() {
                         let context = &*data.context;
 
-                        // These constants are missing from vst3-sys, see:
+                        // These constants are missing from phaselith-vst3-sys, see:
                         // https://steinbergmedia.github.io/vst3_doc/vstinterfaces/structSteinberg_1_1Vst_1_1ProcessContext.html
                         transport.playing = context.state & (1 << 1) != 0; // kPlaying
                         transport.recording = context.state & (1 << 3) != 0; // kRecording

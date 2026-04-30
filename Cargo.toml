@@ -59,10 +59,9 @@ assert_process_allocs = ["dep:assert_no_alloc"]
 # building additional dependencies for audio and MIDI handling.
 standalone = ["dep:baseview", "dep:clap", "dep:cpal", "dep:jack", "dep:midir", "dep:rtrb"]
 # Enables the `nih_export_vst3!()` macro. Enabled by default. This feature
-# exists mostly for GPL-compliance reasons, since even if you don't use the VST3
-# wrapper you might otherwise still include a couple (unused) symbols from the
+# Uses Phaselith's private clean-room VST3 binding instead of the GPL
 # `vst3-sys` crate.
-vst3 = ["dep:vst3-sys"]
+vst3 = ["dep:phaselith-vst3-sys"]
 # Add adapters to the Buffer object for reading the channel data to and from
 # `std::simd` vectors. Requires a nightly compiler.
 simd = []
@@ -112,7 +111,7 @@ midir = { version = "0.9.1", optional = true }
 rtrb = { version = "0.2.2", optional = true }
 
 # Used for the `vst3` feature
-vst3-sys = { git = "https://github.com/robbert-vdh/vst3-sys.git", branch = "fix/drop-box-from-raw", optional = true }
+phaselith-vst3-sys = { git = "https://github.com/Howard0401/phaselith-vst3-sys.git", rev = "6da66c257751b4d2e998dbb51e7dc4f3f229cb40", optional = true }
 
 # Used for the `zstd` feature
 zstd = { version = "0.12.3", optional = true }

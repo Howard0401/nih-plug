@@ -12,7 +12,7 @@ mod wrapper;
 
 /// Re-export for the wrapper.
 pub use factory::PluginInfo;
-pub use vst3_sys;
+pub use phaselith_vst3_sys;
 pub use wrapper::Wrapper;
 
 /// Export one or more VST3 plugins from this library using the provided plugin types. The first
@@ -27,17 +27,17 @@ macro_rules! nih_export_vst3 {
         mod vst3 {
             use ::std::collections::HashSet;
 
-            // `vst3_sys` is imported from the VST3 wrapper module
-            use $crate::wrapper::vst3::{vst3_sys, PluginInfo, Wrapper};
-            use vst3_sys::base::{kInvalidArgument, kResultOk, tresult};
-            use vst3_sys::base::{
+            // `phaselith_vst3_sys` is imported from the VST3 wrapper module
+            use $crate::wrapper::vst3::{phaselith_vst3_sys, PluginInfo, Wrapper};
+            use phaselith_vst3_sys::base::{kInvalidArgument, kResultOk, tresult};
+            use phaselith_vst3_sys::base::{
                 FactoryFlags, IPluginFactory, IPluginFactory2, IPluginFactory3, IUnknown,
                 PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo,
             };
-            use vst3_sys::VST3;
+            use phaselith_vst3_sys::VST3;
 
             // This alias is needed for the VST3 attribute macro
-            use vst3_sys as vst3_com;
+            use phaselith_vst3_sys as vst3_com;
 
             // Because the `$plugin_ty`s are likely defined in the enclosing scope. This works even
             // if the types are not public because this is a child module.
@@ -98,9 +98,9 @@ macro_rules! nih_export_vst3 {
 
                 unsafe fn create_instance(
                     &self,
-                    cid: *const vst3_sys::IID,
-                    iid: *const vst3_sys::IID,
-                    obj: *mut *mut vst3_sys::c_void,
+                    cid: *const phaselith_vst3_sys::IID,
+                    iid: *const phaselith_vst3_sys::IID,
+                    obj: *mut *mut phaselith_vst3_sys::c_void,
                 ) -> tresult {
                     // Can't use `check_null_ptr!()` here without polluting NIH-plug's general
                     // exports
@@ -174,7 +174,7 @@ macro_rules! nih_export_vst3 {
                     kResultOk
                 }
 
-                unsafe fn set_host_context(&self, _context: *mut vst3_sys::c_void) -> tresult {
+                unsafe fn set_host_context(&self, _context: *mut phaselith_vst3_sys::c_void) -> tresult {
                     // We don't need to do anything with this
                     kResultOk
                 }

@@ -1,9 +1,9 @@
 use atomic_refcell::AtomicRefMut;
+use phaselith_vst3_sys::vst::IComponentHandler;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use vst3_sys::vst::IComponentHandler;
 
 use crate::prelude::{
     GuiContext, InitContext, ParamPtr, PluginApi, PluginNoteEvent, PluginState, ProcessContext,

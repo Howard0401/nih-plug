@@ -5,7 +5,7 @@
 //! frustrating and error prone, most code that does not specifically depend on all of the exposed
 //! plugin types was moved back to this module so it can be compiled and type checked as normal.
 
-use vst3_sys::base::{
+use phaselith_vst3_sys::base::{
     ClassCardinality, FactoryFlags, PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo,
 };
 

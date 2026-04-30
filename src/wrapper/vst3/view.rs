@@ -1,34 +1,133 @@
 use atomic_float::AtomicF32;
 use parking_lot::{Mutex, RwLock};
+use phaselith_vst3_sys::base::{
+    kInvalidArgument, kNotImplemented, kResultFalse, kResultOk, tresult, TBool,
+};
+use phaselith_vst3_sys::compat::gui::{IPlugFrame, IPlugView, IPlugViewContentScaleSupport};
+use phaselith_vst3_sys::gui::ViewRect;
+use phaselith_vst3_sys::utils::SharedVstPtr;
+use phaselith_vst3_sys::VST3;
 use std::any::Any;
 use std::ffi::{c_void, CStr};
 use std::mem;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use vst3_sys::base::{kInvalidArgument, kNotImplemented, kResultFalse, kResultOk, tresult, TBool};
-use vst3_sys::gui::{IPlugFrame, IPlugView, IPlugViewContentScaleSupport, ViewRect};
-use vst3_sys::utils::SharedVstPtr;
-use vst3_sys::VST3;
 
 use super::inner::{Task, WrapperInner};
 use super::util::{ObjectPtr, VstPtr};
+use crate::editor::{Modifiers, VirtualKeyCode};
 use crate::plugin::vst3::Vst3Plugin;
 use crate::prelude::{Editor, ParentWindowHandle};
 
+/// Lowest VST3 virtual key code. Values below this are not virtual keys in the
+/// VST3 sense.
+const VKEY_FIRST_CODE: i16 = 1;
+
+/// Highest VST3 virtual key code. Values at 128 and above encode printable
+/// ASCII characters and should continue through the native window path.
+const VKEY_LAST_CODE: i16 = 77;
+
+fn vst3_virtual_key_code(raw: i16) -> Option<VirtualKeyCode> {
+    Some(match raw {
+        1 => VirtualKeyCode::Backspace,
+        2 => VirtualKeyCode::Tab,
+        3 => VirtualKeyCode::Clear,
+        4 => VirtualKeyCode::Return,
+        5 => VirtualKeyCode::Pause,
+        6 => VirtualKeyCode::Escape,
+        7 => VirtualKeyCode::Space,
+        8 => VirtualKeyCode::Next,
+        9 => VirtualKeyCode::End,
+        10 => VirtualKeyCode::Home,
+        11 => VirtualKeyCode::ArrowLeft,
+        12 => VirtualKeyCode::ArrowUp,
+        13 => VirtualKeyCode::ArrowRight,
+        14 => VirtualKeyCode::ArrowDown,
+        15 => VirtualKeyCode::PageUp,
+        16 => VirtualKeyCode::PageDown,
+        17 => VirtualKeyCode::Select,
+        18 => VirtualKeyCode::Print,
+        19 => VirtualKeyCode::NumpadEnter,
+        20 => VirtualKeyCode::Snapshot,
+        21 => VirtualKeyCode::Insert,
+        22 => VirtualKeyCode::Delete,
+        23 => VirtualKeyCode::Help,
+        24 => VirtualKeyCode::Numpad0,
+        25 => VirtualKeyCode::Numpad1,
+        26 => VirtualKeyCode::Numpad2,
+        27 => VirtualKeyCode::Numpad3,
+        28 => VirtualKeyCode::Numpad4,
+        29 => VirtualKeyCode::Numpad5,
+        30 => VirtualKeyCode::Numpad6,
+        31 => VirtualKeyCode::Numpad7,
+        32 => VirtualKeyCode::Numpad8,
+        33 => VirtualKeyCode::Numpad9,
+        34 => VirtualKeyCode::NumpadMultiply,
+        35 => VirtualKeyCode::NumpadAdd,
+        36 => VirtualKeyCode::NumpadSeparator,
+        37 => VirtualKeyCode::NumpadSubtract,
+        38 => VirtualKeyCode::NumpadDecimal,
+        39 => VirtualKeyCode::NumpadDivide,
+        40 => VirtualKeyCode::F1,
+        41 => VirtualKeyCode::F2,
+        42 => VirtualKeyCode::F3,
+        43 => VirtualKeyCode::F4,
+        44 => VirtualKeyCode::F5,
+        45 => VirtualKeyCode::F6,
+        46 => VirtualKeyCode::F7,
+        47 => VirtualKeyCode::F8,
+        48 => VirtualKeyCode::F9,
+        49 => VirtualKeyCode::F10,
+        50 => VirtualKeyCode::F11,
+        51 => VirtualKeyCode::F12,
+        52 => VirtualKeyCode::NumLock,
+        53 => VirtualKeyCode::ScrollLock,
+        54 => VirtualKeyCode::Shift,
+        55 => VirtualKeyCode::Control,
+        56 => VirtualKeyCode::Alt,
+        57 => VirtualKeyCode::Equals,
+        58 => VirtualKeyCode::ContextMenu,
+        59 => VirtualKeyCode::MediaPlay,
+        60 => VirtualKeyCode::MediaStop,
+        61 => VirtualKeyCode::MediaPrevTrack,
+        62 => VirtualKeyCode::MediaNextTrack,
+        63 => VirtualKeyCode::VolumeUp,
+        64 => VirtualKeyCode::VolumeDown,
+        65 => VirtualKeyCode::F13,
+        66 => VirtualKeyCode::F14,
+        67 => VirtualKeyCode::F15,
+        68 => VirtualKeyCode::F16,
+        69 => VirtualKeyCode::F17,
+        70 => VirtualKeyCode::F18,
+        71 => VirtualKeyCode::F19,
+        72 => VirtualKeyCode::F20,
+        73 => VirtualKeyCode::F21,
+        74 => VirtualKeyCode::F22,
+        75 => VirtualKeyCode::F23,
+        76 => VirtualKeyCode::F24,
+        77 => VirtualKeyCode::Super,
+        _ => return None,
+    })
+}
+
+fn vst3_modifiers(raw: i16) -> Modifiers {
+    Modifiers::from_bits_truncate(((raw as u32) & 0x0f) as u8)
+}
+
 // Alias needed for the VST3 attribute macro
-use vst3_sys as vst3_com;
+use phaselith_vst3_sys as vst3_com;
 
 // Thanks for putting this behind a platform-specific ifdef...
-// NOTE: This should also be used on the BSDs, but vst3-sys exposes these interfaces only for Linux
+// NOTE: This should also be used on the BSDs, but phaselith-vst3-sys exposes these interfaces only for Linux
 #[cfg(target_os = "linux")]
 use {
     crate::event_loop::{EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY},
     crossbeam::queue::ArrayQueue,
     libc,
-    vst3_sys::gui::linux::{FileDescriptor, IEventHandler, IRunLoop},
+    phaselith_vst3_sys::gui::linux::{FileDescriptor, IEventHandler, IRunLoop},
 };
 
-// Window handle type constants missing from vst3-sys
+// Window handle type constants missing from phaselith-vst3-sys
 #[allow(unused)]
 const VST3_PLATFORM_HWND: &str = "HWND";
 #[allow(unused)]
@@ -40,7 +139,7 @@ const VST3_PLATFORM_UIVIEW: &str = "UIView";
 #[allow(unused)]
 const VST3_PLATFORM_X11_WINDOW: &str = "X11EmbedWindowID";
 
-/// FIXME: vst3-sys does not allow you to conditionally define fields with #[cfg()], so this is a
+/// FIXME: phaselith-vst3-sys does not allow you to conditionally define fields with #[cfg()], so this is a
 ///        workaround to define the field outside of the struct
 #[cfg(target_os = "linux")]
 struct RunLoopEventHandlerWrapper<P: Vst3Plugin>(RwLock<Option<Box<RunLoopEventHandler<P>>>>);
@@ -59,7 +158,7 @@ pub(crate) struct WrapperView<P: Vst3Plugin> {
     plug_frame: RwLock<Option<VstPtr<dyn IPlugFrame>>>,
     /// Allows handling events events on the host's GUI thread when using Linux. Needed because
     /// otherwise REAPER doesn't like us very much. The event handler could be implemented directly
-    /// on this object but vst3-sys does not let us conditionally implement interfaces.
+    /// on this object but phaselith-vst3-sys does not let us conditionally implement interfaces.
     run_loop_event_handler: RunLoopEventHandlerWrapper<P>,
 
     /// The DPI scaling factor as passed to the [IPlugViewContentScaleSupport::set_scale_factor()]
@@ -70,7 +169,7 @@ pub(crate) struct WrapperView<P: Vst3Plugin> {
 }
 
 /// Allow handling tasks on the host's GUI thread on Linux. This doesn't need to be a separate
-/// struct, but vst3-sys does not let us implement interfaces conditionally and the interface is
+/// struct, but phaselith-vst3-sys does not let us implement interfaces conditionally and the interface is
 /// only exposed when compiling on Linux. The struct will register itself when calling
 /// [`RunLoopEventHandler::new()`] and it will unregister itself when it gets dropped.
 #[cfg(target_os = "linux")]
@@ -176,6 +275,25 @@ impl<P: Vst3Plugin> WrapperView<P> {
     pub fn do_maybe_in_run_loop(&self, task: Task<P>) -> Result<(), Task<P>> {
         Err(task)
     }
+
+    fn dispatch_virtual_key(&self, key_code: i16, is_down: bool, modifiers: i16) -> tresult {
+        if !(VKEY_FIRST_CODE..=VKEY_LAST_CODE).contains(&key_code) {
+            return kResultFalse;
+        }
+        let Some(key_code) = vst3_virtual_key_code(key_code) else {
+            return kResultFalse;
+        };
+
+        if self
+            .editor
+            .lock()
+            .on_virtual_key_from_host(key_code, is_down, vst3_modifiers(modifiers))
+        {
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -203,7 +321,7 @@ impl<P: Vst3Plugin> RunLoopEventHandler<P> {
             ArrayQueue::new(TASK_QUEUE_CAPACITY),
         );
 
-        // vst3-sys provides no way to convert to a SharedVstPtr, so, uh, yeah. These are pointers
+        // phaselith-vst3-sys provides no way to convert to a SharedVstPtr, so, uh, yeah. These are pointers
         // to vtable poitners.
         let event_handler: SharedVstPtr<dyn IEventHandler> =
             unsafe { mem::transmute(&handler.__ieventhandlervptr as *const *const _) };
@@ -246,7 +364,10 @@ impl<P: Vst3Plugin> RunLoopEventHandler<P> {
 
 impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_X11_WINDOW => kResultOk,
@@ -258,7 +379,10 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     }
 
     #[cfg(target_os = "macos")]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_NSVIEW => kResultOk,
@@ -270,7 +394,10 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
     }
 
     #[cfg(target_os = "windows")]
-    unsafe fn is_platform_type_supported(&self, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn is_platform_type_supported(
+        &self,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let type_ = CStr::from_ptr(type_);
         match type_.to_str() {
             Ok(type_) if type_ == VST3_PLATFORM_HWND => kResultOk,
@@ -281,7 +408,11 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
         }
     }
 
-    unsafe fn attached(&self, parent: *mut c_void, type_: vst3_sys::base::FIDString) -> tresult {
+    unsafe fn attached(
+        &self,
+        parent: *mut c_void,
+        type_: phaselith_vst3_sys::base::FIDString,
+    ) -> tresult {
         let mut editor_handle = self.editor_handle.write();
         if editor_handle.is_none() {
             let type_ = CStr::from_ptr(type_);
@@ -338,20 +469,20 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
 
     unsafe fn on_key_down(
         &self,
-        _key: vst3_sys::base::char16,
-        _key_code: i16,
-        _modifiers: i16,
+        _key: phaselith_vst3_sys::base::char16,
+        key_code: i16,
+        modifiers: i16,
     ) -> tresult {
-        kNotImplemented
+        self.dispatch_virtual_key(key_code, true, modifiers)
     }
 
     unsafe fn on_key_up(
         &self,
-        _key: vst3_sys::base::char16,
-        _key_code: i16,
-        _modifiers: i16,
+        _key: phaselith_vst3_sys::base::char16,
+        key_code: i16,
+        modifiers: i16,
     ) -> tresult {
-        kNotImplemented
+        self.dispatch_virtual_key(key_code, false, modifiers)
     }
 
     unsafe fn get_size(&self, size: *mut ViewRect) -> tresult {
@@ -438,6 +569,31 @@ impl<P: Vst3Plugin> IPlugView for WrapperView<P> {
         } else {
             kResultFalse
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vst3_virtual_key_mapping_excludes_ascii_range() {
+        assert_eq!(vst3_virtual_key_code(1), Some(VirtualKeyCode::Backspace));
+        assert_eq!(vst3_virtual_key_code(7), Some(VirtualKeyCode::Space));
+        assert_eq!(vst3_virtual_key_code(13), Some(VirtualKeyCode::ArrowRight));
+        assert_eq!(vst3_virtual_key_code(77), Some(VirtualKeyCode::Super));
+        assert_eq!(vst3_virtual_key_code(0), None);
+        assert_eq!(vst3_virtual_key_code(128), None);
+    }
+
+    #[test]
+    fn vst3_modifier_mapping_drops_unknown_bits() {
+        let modifiers = vst3_modifiers(0b1_1111);
+        assert!(modifiers.contains(Modifiers::SHIFT));
+        assert!(modifiers.contains(Modifiers::ALT));
+        assert!(modifiers.contains(Modifiers::COMMAND));
+        assert!(modifiers.contains(Modifiers::CONTROL));
+        assert_eq!(modifiers.bits(), 0b1111);
     }
 }
 
