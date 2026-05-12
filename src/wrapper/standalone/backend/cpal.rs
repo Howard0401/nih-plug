@@ -24,6 +24,8 @@ use crate::prelude::{
 use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
 
 const MIDI_EVENT_QUEUE_CAPACITY: usize = 2048;
+const STANDALONE_RING_BUFFER_PERIOD_HEADROOM: usize = 8;
+const STANDALONE_RING_BUFFER_MIN_FRAMES: usize = 4096;
 
 /// Uses CPAL for audio and midir for MIDI.
 pub struct CpalMidir {
@@ -83,6 +85,98 @@ impl ChannelPointerVec {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_cpal_resize_helpers_grow_existing_storage() {
+        let mut main_storage = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        resize_main_io_storage(&mut main_storage, 4);
+
+        assert_eq!(main_storage[0], vec![1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(main_storage[1], vec![3.0, 4.0, 0.0, 0.0]);
+
+        let mut aux_storage = vec![vec![vec![5.0], vec![6.0]]];
+        resize_aux_io_storage(&mut aux_storage, 3);
+
+        assert_eq!(aux_storage[0][0], vec![5.0, 0.0, 0.0]);
+        assert_eq!(aux_storage[0][1], vec![6.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn standalone_cpal_ring_buffer_capacity_has_wasapi_headroom() {
+        assert_eq!(
+            standalone_ring_buffer_capacity_frames(512),
+            STANDALONE_RING_BUFFER_MIN_FRAMES
+        );
+        assert_eq!(
+            standalone_ring_buffer_capacity_frames(8192),
+            8192 * STANDALONE_RING_BUFFER_PERIOD_HEADROOM
+        );
+    }
+
+    #[test]
+    fn standalone_cpal_input_ringbuffer_is_deinterleaved_by_frame() {
+        let (mut producer, mut consumer) = RingBuffer::new(8);
+        for sample in [1.0, 10.0, 2.0, 20.0, 3.0, 30.0] {
+            producer.push(sample).unwrap();
+        }
+
+        let mut storage = vec![vec![0.0; 3], vec![0.0; 3]];
+        fill_interleaved_input_from_ringbuffer(&mut storage, 3, 2, &mut consumer);
+
+        assert_eq!(storage[0], vec![1.0, 2.0, 3.0]);
+        assert_eq!(storage[1], vec![10.0, 20.0, 30.0]);
+    }
+}
+
+fn resize_main_io_storage(storage: &mut [Vec<f32>], buffer_size: usize) {
+    for channel in storage {
+        channel.resize(buffer_size, 0.0);
+    }
+}
+
+fn resize_aux_io_storage(storage: &mut [Vec<Vec<f32>>], buffer_size: usize) {
+    for port in storage {
+        resize_main_io_storage(port, buffer_size);
+    }
+}
+
+fn standalone_ring_buffer_capacity_frames(configured_period_size: usize) -> usize {
+    configured_period_size
+        .saturating_mul(STANDALONE_RING_BUFFER_PERIOD_HEADROOM)
+        .max(STANDALONE_RING_BUFFER_MIN_FRAMES)
+}
+
+fn fill_interleaved_input_from_ringbuffer(
+    storage: &mut [Vec<f32>],
+    active_sample_count: usize,
+    num_input_channels: usize,
+    input_rb_consumer: &mut rtrb::Consumer<f32>,
+) {
+    let active_input_channels = num_input_channels.min(storage.len());
+
+    for channel in storage.iter_mut() {
+        channel[..active_sample_count].fill(0.0);
+    }
+
+    for frame_idx in 0..active_sample_count {
+        for channel_idx in 0..num_input_channels {
+            loop {
+                // Keep spinning on this if the output callback somehow outpaces the input
+                // callback.
+                if let Ok(input_sample) = input_rb_consumer.pop() {
+                    if channel_idx < active_input_channels {
+                        storage[channel_idx][frame_idx] = input_sample;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// A task for the MIDI output thread.
 enum MidiOutputTask<P: Plugin> {
     /// Send an event as MIDI data.
@@ -130,9 +224,13 @@ impl<P: Plugin> Backend<P> for CpalMidir {
             let mut input_rb_consumer: Option<rtrb::Consumer<f32>> = None;
             if let Some(input) = &self.input {
                 // Data is sent to the output data callback using a wait-free ring buffer
-                let (rb_producer, rb_consumer) = RingBuffer::new(
-                    self.output.config.channels as usize * self.config.period_size as usize,
-                );
+                let ring_buffer_channels = (input.config.channels as usize)
+                    .max(self.output.config.channels as usize)
+                    .max(1);
+                let ring_buffer_frames =
+                    standalone_ring_buffer_capacity_frames(self.config.period_size as usize);
+                let (rb_producer, rb_consumer) =
+                    RingBuffer::new(ring_buffer_channels * ring_buffer_frames);
                 input_rb_consumer = Some(rb_consumer);
 
                 let input_parker = Parker::new();
@@ -691,7 +789,8 @@ impl CpalMidir {
     {
         // We'll receive interlaced input samples from CPAL. These need to converted to deinterlaced
         // channels, processed, and then copied those back to an interlaced buffer for the output.
-        let buffer_size = self.config.period_size as usize;
+        let configured_buffer_size = self.config.period_size as usize;
+        let mut buffer_size = configured_buffer_size;
         let num_output_channels = self
             .audio_io_layout
             .main_output_channels
@@ -755,8 +854,28 @@ impl CpalMidir {
 
         // Can't borrow from `self` in the callback
         let config = self.config.clone();
+        let audio_io_layout = self.audio_io_layout;
         let mut num_processed_samples = 0usize;
+        let mut warned_about_dynamic_wasapi_period = false;
         move |data, _info| {
+            let actual_sample_count = data.len() / num_output_channels;
+            if actual_sample_count > buffer_size {
+                if !warned_about_dynamic_wasapi_period {
+                    nih_warn!(
+                        "The CPAL backend delivered {actual_sample_count} samples while the \
+                         requested standalone period size is {configured_buffer_size}; growing \
+                         standalone buffers instead of aborting"
+                    );
+                    warned_about_dynamic_wasapi_period = true;
+                }
+
+                buffer_size = actual_sample_count;
+                resize_main_io_storage(&mut main_io_storage, buffer_size);
+                resize_aux_io_storage(&mut aux_input_storage, buffer_size);
+                resize_aux_io_storage(&mut aux_output_storage, buffer_size);
+                buffer_manager = BufferManager::for_audio_io_layout(buffer_size, audio_io_layout);
+            }
+
             let mut transport = Transport::new(config.sample_rate);
             transport.pos_samples = Some(num_processed_samples as i64);
             transport.tempo = Some(config.tempo as f64);
@@ -772,22 +891,16 @@ impl CpalMidir {
             // write-only (with `BufferManager` always zeroing them out when creating the buffers).
             match &mut input_rb_consumer {
                 Some(input_rb_consumer) => {
-                    for channel in main_io_storage.iter_mut() {
-                        for sample in channel {
-                            loop {
-                                // Keep spinning on this if the output callback somehow outpaces the
-                                // input callback
-                                if let Ok(input_sample) = input_rb_consumer.pop() {
-                                    *sample = input_sample;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    fill_interleaved_input_from_ringbuffer(
+                        &mut main_io_storage,
+                        actual_sample_count,
+                        num_input_channels,
+                        input_rb_consumer,
+                    );
                 }
                 None => {
                     for channel in main_io_storage.iter_mut() {
-                        channel.fill(0.0);
+                        channel[..actual_sample_count].fill(0.0);
                     }
                 }
             }
@@ -826,14 +939,10 @@ impl CpalMidir {
             }
 
             {
-                // Even though we told CPAL that we wanted `buffer_size` samples, it may still give
-                // us fewer. If we receive more than what we configured, then this will panic.
-                let actual_sample_count = data.len() / num_output_channels;
-                assert!(
-                    actual_sample_count <= buffer_size,
-                    "Received {actual_sample_count} samples, while the configured buffer size is \
-                     {buffer_size}"
-                );
+                // Even though we told CPAL that we wanted `configured_buffer_size` samples, some
+                // backends may still deliver fewer or more frames. `buffer_size` tracks the largest
+                // callback observed so far so this standalone runner can keep processing instead
+                // of aborting in shared-mode WASAPI.
                 let buffers = unsafe {
                     buffer_manager.create_buffers(0, actual_sample_count, |buffer_sources| {
                         *buffer_sources.main_output_channel_pointers = Some(ChannelPointers {
@@ -921,7 +1030,7 @@ impl CpalMidir {
                 }
             }
 
-            num_processed_samples += buffer_size;
+            num_processed_samples += actual_sample_count;
         }
     }
 }
