@@ -46,6 +46,25 @@ struct CpalDevice {
     pub sample_format: SampleFormat,
 }
 
+#[derive(Clone, Copy)]
+enum CpalInputSource {
+    Capture,
+    WasapiLoopback,
+}
+
+fn host_supports_wasapi_loopback(cpal_host_id: cpal::HostId) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        cpal_host_id == cpal::HostId::Wasapi
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cpal_host_id;
+        false
+    }
+}
+
 /// All data needed to create a Midir input stream.
 struct MidirInputDevice {
     pub backend: MidiInput,
@@ -448,10 +467,21 @@ impl CpalMidir {
         let audio_io_layout = config.audio_io_layout_or_exit::<P>();
         let host = cpal::host_from_id(cpal_host_id).context("The Audio API is unavailable")?;
 
-        if config.input_device.is_none() && audio_io_layout.main_input_channels.is_some() {
+        if config.input_device.is_some() && config.input_loopback_device.is_some() {
+            anyhow::bail!(
+                "Use either '--input-device' for capture input or '--input-loopback-device' for \
+                 WASAPI render loopback input, not both."
+            );
+        }
+
+        if config.input_device.is_none()
+            && config.input_loopback_device.is_none()
+            && audio_io_layout.main_input_channels.is_some()
+        {
             nih_log!(
                 "Audio inputs are not connected automatically to prevent feedback. Use the \
-                 '--input-device' option to choose an input device."
+                 '--input-device' option to choose a capture input device, or \
+                 '--input-loopback-device' on WASAPI/Windows to capture a render device."
             )
         }
 
@@ -462,11 +492,12 @@ impl CpalMidir {
             nih_log!("Use the '--midi-output' option to select a MIDI output device.")
         }
 
-        // No input device is connected unless requested by the user to avoid feedback loops
-        let input_device = config
-            .input_device
-            .as_ref()
-            .map(|name| -> Result<Device> {
+        // No input device is connected unless requested by the user to avoid feedback loops.
+        let input_device = match (
+            config.input_device.as_ref(),
+            config.input_loopback_device.as_ref(),
+        ) {
+            (Some(name), None) => {
                 let device = host
                     .input_devices()
                     .context("No audio input devices available")?
@@ -486,9 +517,36 @@ impl CpalMidir {
                         message
                     })?;
 
-                Ok(device)
-            })
-            .transpose()?;
+                Some((device, CpalInputSource::Capture))
+            }
+            (None, Some(name)) => {
+                if !host_supports_wasapi_loopback(cpal_host_id) {
+                    anyhow::bail!(
+                        "'--input-loopback-device' is only supported by the WASAPI backend on \
+                         Windows."
+                    );
+                }
+
+                let device = host
+                    .output_devices()
+                    .context("No audio render devices available for loopback input")?
+                    .find(|d| d.name().as_deref().map(|n| n == name).unwrap_or(false))
+                    .with_context(|| {
+                        let mut message = format!(
+                            "Unknown loopback input render device '{name}'. Available devices are:"
+                        );
+                        for device_name in host.output_devices().unwrap().flat_map(|d| d.name()) {
+                            message.push_str(&format!("\n{device_name}"))
+                        }
+
+                        message
+                    })?;
+
+                Some((device, CpalInputSource::WasapiLoopback))
+            }
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
+        };
 
         let output_device = match config.output_device.as_ref() {
             Some(name) => host
@@ -516,10 +574,19 @@ impl CpalMidir {
             .map(NonZeroU32::get)
             .unwrap_or_default() as usize;
         let input = input_device
-            .map(|device| -> Result<CpalDevice> {
-                let input_configs: Vec<_> = device
-                    .supported_input_configs()
-                    .context("Could not get supported audio input configurations")?
+            .map(|(device, source)| -> Result<CpalDevice> {
+                let input_configs: Vec<_> = match source {
+                    CpalInputSource::Capture => device
+                        .supported_input_configs()
+                        .context("Could not get supported audio input configurations")?
+                        .collect(),
+                    CpalInputSource::WasapiLoopback => device
+                        .supported_output_configs()
+                        .context("Could not get supported loopback render configurations")?
+                        .collect(),
+                };
+                let input_configs: Vec<_> = input_configs
+                    .into_iter()
                     .filter(|c| match c.buffer_size() {
                         cpal::SupportedBufferSize::Range { min, max } => {
                             c.channels() as usize == num_input_channels

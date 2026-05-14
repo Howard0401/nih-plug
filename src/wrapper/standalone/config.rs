@@ -38,6 +38,13 @@ pub struct WrapperConfig {
     /// Specifying an empty string or other invalid value will list all available input devices.
     #[clap(value_parser, long)]
     pub input_device: Option<String>,
+    /// The render/output device to capture through WASAPI loopback and feed into the plugin input.
+    ///
+    /// This is only meaningful for the WASAPI backend on Windows. Specifying an empty string or
+    /// other invalid value will list all available render devices that can be used as loopback
+    /// sources.
+    #[clap(value_parser, long)]
+    pub input_loopback_device: Option<String>,
     /// The output device for the ALSA, CoreAudio, and WASAPI backends.
     ///
     /// Specifying an empty string or other invalid value will list all available output devices.
@@ -178,5 +185,35 @@ impl WrapperConfig {
             }
             _ => P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn wrapper_config_accepts_wasapi_loopback_input_device() {
+        let config = WrapperConfig::try_parse_from([
+            "phaselith",
+            "--input-loopback-device",
+            "Game (Example Audio)",
+        ])
+        .expect("loopback input device flag should parse");
+
+        assert_eq!(config.input_device, None);
+        assert_eq!(
+            config.input_loopback_device.as_deref(),
+            Some("Game (Example Audio)")
+        );
+    }
+
+    #[test]
+    fn wrapper_config_preserves_empty_loopback_device_for_listing() {
+        let config = WrapperConfig::try_parse_from(["phaselith", "--input-loopback-device="])
+            .expect("empty loopback input device should parse for listing");
+
+        assert_eq!(config.input_loopback_device.as_deref(), Some(""));
     }
 }
