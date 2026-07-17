@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
+use super::f64_buffer_adapter::F64BufferAdapter;
 use super::note_expressions::NoteExpressionController;
 use super::param_units::ParamUnits;
 use super::util::{ObjectPtr, VstPtr, VST3_MIDI_PARAMS_END, VST3_MIDI_PARAMS_START};
@@ -71,6 +72,8 @@ pub(crate) struct WrapperInner<P: Vst3Plugin> {
     /// The current buffer configuration, containing the sample rate and the maximum block size.
     /// Will be set in `IAudioProcessor::setupProcessing()`.
     pub current_buffer_config: AtomicCell<Option<BufferConfig>>,
+    /// The sample representation accepted in the most recent successful setup call.
+    pub current_symbolic_sample_size: AtomicCell<i32>,
     /// The current audio processing mode. Set in `IAudioProcessor::setup_processing()`.
     pub current_process_mode: AtomicCell<ProcessMode>,
     /// The last process status returned by the plugin. This is used for tail handling.
@@ -81,6 +84,8 @@ pub(crate) struct WrapperInner<P: Vst3Plugin> {
     /// A data structure that helps manage and create buffers for all of the plugin's inputs and
     /// outputs based on channel pointers provided by the host.
     pub buffer_manager: AtomicRefCell<BufferManager>,
+    /// Preallocated conversion and carrier-residual storage for opted-in VST3 kSample64 plugins.
+    pub f64_buffer_adapter: AtomicRefCell<F64BufferAdapter>,
     /// The incoming events for the plugin, if `P::ACCEPTS_MIDI` is set. If
     /// `P::SAMPLE_ACCURATE_AUTOMATION`, this is also read in lockstep with the parameter change
     /// block splitting.
@@ -296,6 +301,9 @@ impl<P: Vst3Plugin> WrapperInner<P> {
                 P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default(),
             ),
             current_buffer_config: AtomicCell::new(None),
+            current_symbolic_sample_size: AtomicCell::new(
+                phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32,
+            ),
             current_process_mode: AtomicCell::new(ProcessMode::Realtime),
             last_process_status: AtomicCell::new(ProcessStatus::Normal),
             current_latency: AtomicU32::new(0),
@@ -304,6 +312,12 @@ impl<P: Vst3Plugin> WrapperInner<P> {
             buffer_manager: AtomicRefCell::new(BufferManager::for_audio_io_layout(
                 0,
                 AudioIOLayout::default(),
+            )),
+            f64_buffer_adapter: AtomicRefCell::new(F64BufferAdapter::for_audio_io_layout(
+                0,
+                AudioIOLayout::default(),
+                0.0,
+                0.0,
             )),
             input_events: AtomicRefCell::new(VecDeque::with_capacity(1024)),
             output_events: AtomicRefCell::new(VecDeque::with_capacity(1024)),

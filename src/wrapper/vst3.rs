@@ -2,6 +2,7 @@
 mod util;
 
 mod context;
+mod f64_buffer_adapter;
 mod factory;
 mod inner;
 mod note_expressions;

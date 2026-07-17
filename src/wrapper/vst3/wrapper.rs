@@ -21,6 +21,7 @@ use std::sync::Arc;
 use vst3_com::vst::{DataEvent, IProcessContextRequirementsFlags, ProcessModes};
 use widestring::U16CStr;
 
+use super::f64_buffer_adapter::F64BufferAdapter;
 use super::inner::{ProcessEvent, WrapperInner};
 use super::note_expressions::{self, NoteExpressionController};
 use super::util::{
@@ -396,6 +397,17 @@ impl<P: Vst3Plugin> IComponent for Wrapper<P> {
                         buffer_config.max_buffer_size as usize,
                         audio_io_layout,
                     );
+                    *self.inner.f64_buffer_adapter.borrow_mut() =
+                        F64BufferAdapter::for_audio_io_layout(
+                            buffer_config.max_buffer_size as usize,
+                            if P::VST3_SUPPORTS_SAMPLE64 {
+                                audio_io_layout
+                            } else {
+                                Default::default()
+                            },
+                            buffer_config.sample_rate,
+                            P::VST3_SAMPLE64_MAX_LATENCY_SECONDS,
+                        );
 
                     kResultOk
                 } else {
@@ -851,7 +863,11 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     }
 
     unsafe fn can_process_sample_size(&self, symbolic_sample_size: i32) -> tresult {
-        if symbolic_sample_size == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32 {
+        if symbolic_sample_size == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
+            || (P::VST3_SUPPORTS_SAMPLE64
+                && symbolic_sample_size
+                    == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample64 as i32)
+        {
             kResultOk
         } else {
             kResultFalse
@@ -868,12 +884,18 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     ) -> tresult {
         check_null_ptr!(setup);
 
-        // There's no special handling for offline processing at the moment
         let setup = &*setup;
-        nih_debug_assert_eq!(
-            setup.symbolic_sample_size,
-            phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
-        );
+        let supports_sample_size = setup.symbolic_sample_size
+            == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
+            || (P::VST3_SUPPORTS_SAMPLE64
+                && setup.symbolic_sample_size
+                    == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample64 as i32);
+        if !supports_sample_size || setup.max_samples_per_block < 0 || setup.sample_rate <= 0.0 {
+            return kInvalidArgument;
+        }
+        self.inner
+            .current_symbolic_sample_size
+            .store(setup.symbolic_sample_size);
 
         // This is needed when activating the plugin and when restoring state
         self.inner.current_buffer_config.store(Some(BufferConfig {
@@ -950,20 +972,46 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                 .expect("Process call without prior setup call")
                 .sample_rate;
 
-            nih_debug_assert!(data.num_inputs >= 0 && data.num_outputs >= 0);
-            nih_debug_assert_eq!(
-                data.symbolic_sample_size,
-                phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
-            );
-            nih_debug_assert!(data.num_samples >= 0);
-
+            if data.num_inputs < 0 || data.num_outputs < 0 || data.num_samples < 0 {
+                return kInvalidArgument;
+            }
+            if data.symbolic_sample_size != self.inner.current_symbolic_sample_size.load() {
+                nih_debug_assert_failure!(
+                    "Process sample size {} does not match setup sample size {}",
+                    data.symbolic_sample_size,
+                    self.inner.current_symbolic_sample_size.load()
+                );
+                return kInvalidArgument;
+            }
             let total_buffer_len = data.num_samples as usize;
+            if total_buffer_len
+                > self
+                    .inner
+                    .current_buffer_config
+                    .load()
+                    .unwrap()
+                    .max_buffer_size as usize
+            {
+                return kInvalidArgument;
+            }
 
             let current_audio_io_layout = self.inner.current_audio_io_layout.load();
             let has_main_input = current_audio_io_layout.main_input_channels.is_some();
             let has_main_output = current_audio_io_layout.main_output_channels.is_some();
             let aux_input_start_idx = if has_main_input { 1 } else { 0 };
             let aux_output_start_idx = if has_main_output { 1 } else { 0 };
+
+            let is_sample64 = data.symbolic_sample_size
+                == phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample64 as i32;
+            let mut f64_buffer_adapter =
+                is_sample64.then(|| self.inner.f64_buffer_adapter.borrow_mut());
+            if let Some(adapter) = f64_buffer_adapter.as_mut() {
+                adapter.prepare(
+                    data,
+                    total_buffer_len,
+                    self.inner.current_latency.load(Ordering::SeqCst),
+                );
+            }
 
             // NOTE: VST3 hosts may trigger a 'parameter flush' by calling the process function for
             //       0 input samples. If this is the case then we'll only handle events and skip all
@@ -1236,6 +1284,28 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                     let mut buffer_manager = self.inner.buffer_manager.borrow_mut();
                     let buffers =
                         buffer_manager.create_buffers(block_start, block_len, |buffer_source| {
+                            if let Some(adapter) = f64_buffer_adapter.as_mut() {
+                                *buffer_source.main_output_channel_pointers =
+                                    adapter.main_output_channel_pointers();
+                                *buffer_source.main_input_channel_pointers =
+                                    adapter.main_input_channel_pointers();
+                                for (index, pointers) in buffer_source
+                                    .aux_input_channel_pointers
+                                    .iter_mut()
+                                    .enumerate()
+                                {
+                                    *pointers = adapter.aux_input_channel_pointers(index);
+                                }
+                                for (index, pointers) in buffer_source
+                                    .aux_output_channel_pointers
+                                    .iter_mut()
+                                    .enumerate()
+                                {
+                                    *pointers = adapter.aux_output_channel_pointers(index);
+                                }
+                                return;
+                            }
+
                             if data.num_outputs > 0
                                 && !data.outputs.is_null()
                                 && !(*data.outputs).buffers.is_null()
@@ -1271,7 +1341,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                                     .enumerate()
                                 {
                                     let aux_input_idx = aux_input_no + aux_input_start_idx;
-                                    if aux_input_idx > data.num_outputs as usize {
+                                    if aux_input_idx >= data.num_inputs as usize {
                                         break;
                                     }
 
@@ -1295,7 +1365,7 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                                     .enumerate()
                                 {
                                     let aux_output_idx = aux_output_no + aux_output_start_idx;
-                                    if aux_output_idx > data.num_outputs as usize {
+                                    if aux_output_idx >= data.num_outputs as usize {
                                         break;
                                     }
 
@@ -1650,6 +1720,12 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
                     block_start = block_end;
                 }
             };
+
+            if !is_param_flush {
+                if let Some(adapter) = f64_buffer_adapter.as_ref() {
+                    adapter.write_back(data, total_buffer_len);
+                }
+            }
 
             // After processing audio, we'll check if the editor has sent us updated plugin state.
             // We'll restore that here on the audio thread to prevent changing the values during the

@@ -14,6 +14,23 @@ pub trait Vst3Plugin: Plugin {
     /// truncated.
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory];
 
+    /// Whether this plugin accepts VST3 `kSample64` host buffers.
+    ///
+    /// NIH-plug's public processing API remains `f32`. Opting in enables the wrapper's
+    /// allocation-free f64 boundary bridge: host samples are quantized once for the `f32` DSP
+    /// core and the discarded input residual is delayed by the plugin-reported latency before it
+    /// is added back to the f64 output. This makes a latency-correct transparent path preserve the
+    /// host's f64 carrier while keeping the core's actual arithmetic precision explicit.
+    const VST3_SUPPORTS_SAMPLE64: bool = false;
+
+    /// Maximum latency covered by the f64 boundary bridge's residual delay, in seconds.
+    ///
+    /// Storage is allocated during activation, never in `process()`. A plugin opting into
+    /// `VST3_SUPPORTS_SAMPLE64` must set this high enough for every latency it can report. The
+    /// default one-second bound is deliberately conservative for effects while avoiding an
+    /// unbounded realtime allocation contract.
+    const VST3_SAMPLE64_MAX_LATENCY_SECONDS: f64 = 1.0;
+
     /// [`VST3_CLASS_ID`][Self::VST3_CLASS_ID`] in the correct order for the current platform so
     /// projects and presets can be shared between platforms. This should not be overridden.
     const PLATFORM_VST3_CLASS_ID: [u8; 16] = swap_vst3_uid_byte_order(Self::VST3_CLASS_ID);
