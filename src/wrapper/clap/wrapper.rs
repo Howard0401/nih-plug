@@ -22,9 +22,6 @@ use clap_sys::ext::audio_ports::{
 use clap_sys::ext::audio_ports_config::{
     clap_audio_ports_config, clap_plugin_audio_ports_config, CLAP_EXT_AUDIO_PORTS_CONFIG,
 };
-use clap_sys::ext::remote_controls::{
-    clap_plugin_remote_controls, clap_remote_controls_page, CLAP_EXT_REMOTE_CONTROLS,
-};
 use clap_sys::ext::gui::{
     clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window, CLAP_EXT_GUI,
     CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
@@ -39,6 +36,9 @@ use clap_sys::ext::params::{
     CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY,
     CLAP_PARAM_IS_STEPPED, CLAP_PARAM_RESCAN_VALUES,
+};
+use clap_sys::ext::remote_controls::{
+    clap_plugin_remote_controls, clap_remote_controls_page, CLAP_EXT_REMOTE_CONTROLS,
 };
 use clap_sys::ext::render::{
     clap_plugin_render, clap_plugin_render_mode, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE,
@@ -95,6 +95,14 @@ use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
 use crate::wrapper::util::{
     clamp_input_event_timing, clamp_output_event_timing, hash_param_id, process_wrapper, strlcpy,
 };
+
+fn process_mode_from_clap(mode: clap_plugin_render_mode) -> Option<ProcessMode> {
+    match mode {
+        CLAP_RENDER_REALTIME => Some(ProcessMode::Realtime),
+        CLAP_RENDER_OFFLINE => Some(ProcessMode::Offline),
+        _ => None,
+    }
+}
 
 /// How many output parameter changes we can store in our output parameter change queue. Storing
 /// more than this many parameters at a time will cause changes to get lost.
@@ -1877,11 +1885,13 @@ impl<P: ClapPlugin> Wrapper<P> {
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
         let audio_io_layout = wrapper.current_audio_io_layout.load();
-        let buffer_config = BufferConfig {
-            sample_rate: sample_rate as f32,
-            min_buffer_size: Some(min_frames_count),
-            max_buffer_size: max_frames_count,
-            process_mode: wrapper.current_process_mode.load(),
+        let Some(buffer_config) = BufferConfig::from_host(
+            sample_rate,
+            Some(min_frames_count),
+            max_frames_count,
+            wrapper.current_process_mode.load(),
+        ) else {
+            return false;
         };
 
         // Before initializing the plugin, make sure all smoothers are set the the default values
@@ -3081,14 +3091,10 @@ impl<P: ClapPlugin> Wrapper<P> {
         check_null_ptr!(false, plugin, (*plugin).plugin_data);
         let wrapper = &*((*plugin).plugin_data as *const Self);
 
-        let mode = match mode {
-            CLAP_RENDER_REALTIME => ProcessMode::Realtime,
-            // Even if the plugin has a hard realtime requirement, we'll still honor this
-            CLAP_RENDER_OFFLINE => ProcessMode::Offline,
-            n => {
-                nih_debug_assert_failure!("Unknown rendering mode '{}', defaulting to realtime", n);
-                ProcessMode::Realtime
-            }
+        // Even if the plugin has a hard realtime requirement, honor a valid
+        // offline request. Unknown extension values must not mutate the mode.
+        let Some(mode) = process_mode_from_clap(mode) else {
+            return false;
         };
         wrapper.current_process_mode.store(mode);
 
@@ -3227,5 +3233,23 @@ unsafe fn query_host_extension<T>(
         Some(ClapPtr::new(extension_ptr as *const T))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{process_mode_from_clap, ProcessMode, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
+
+    #[test]
+    fn render_mode_conversion_rejects_unknown_values() {
+        assert_eq!(
+            process_mode_from_clap(CLAP_RENDER_REALTIME),
+            Some(ProcessMode::Realtime)
+        );
+        assert_eq!(
+            process_mode_from_clap(CLAP_RENDER_OFFLINE),
+            Some(ProcessMode::Offline)
+        );
+        assert_eq!(process_mode_from_clap(!0), None);
     }
 }

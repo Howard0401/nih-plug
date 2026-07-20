@@ -89,6 +89,36 @@ pub struct BufferConfig {
     pub process_mode: ProcessMode,
 }
 
+impl BufferConfig {
+    /// Convert host-provided buffer geometry without allowing lossy floating-
+    /// point conversion or an impossible frame-count range into plugin state.
+    /// Format wrappers should reject the host call when this returns `None`.
+    pub(crate) fn from_host(
+        sample_rate: f64,
+        min_buffer_size: Option<u32>,
+        max_buffer_size: u32,
+        process_mode: ProcessMode,
+    ) -> Option<Self> {
+        let sample_rate_f32 = sample_rate as f32;
+        if !sample_rate.is_finite()
+            || sample_rate <= 0.0
+            || !sample_rate_f32.is_finite()
+            || sample_rate_f32 <= 0.0
+            || max_buffer_size == 0
+            || min_buffer_size.is_some_and(|minimum| minimum > max_buffer_size)
+        {
+            return None;
+        }
+
+        Some(Self {
+            sample_rate: sample_rate_f32,
+            min_buffer_size,
+            max_buffer_size,
+            process_mode,
+        })
+    }
+}
+
 /// The plugin's current processing mode. Exposed through [`BufferConfig::process_mode`]. The host
 /// will reinitialize the plugin whenever this changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,5 +230,53 @@ impl PortNames {
             aux_inputs: &[],
             aux_outputs: &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BufferConfig, ProcessMode};
+
+    #[test]
+    fn host_buffer_config_accepts_bounded_representable_geometry() {
+        assert_eq!(
+            BufferConfig::from_host(48_000.0, None, 512, ProcessMode::Realtime),
+            Some(BufferConfig {
+                sample_rate: 48_000.0,
+                min_buffer_size: None,
+                max_buffer_size: 512,
+                process_mode: ProcessMode::Realtime,
+            })
+        );
+        assert_eq!(
+            BufferConfig::from_host(96_000.0, Some(0), 2_048, ProcessMode::Offline),
+            Some(BufferConfig {
+                sample_rate: 96_000.0,
+                min_buffer_size: Some(0),
+                max_buffer_size: 2_048,
+                process_mode: ProcessMode::Offline,
+            })
+        );
+    }
+
+    #[test]
+    fn host_buffer_config_rejects_invalid_rate_or_geometry() {
+        for sample_rate in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -48_000.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            (f32::MAX as f64) * 2.0,
+        ] {
+            assert!(
+                BufferConfig::from_host(sample_rate, None, 512, ProcessMode::Realtime).is_none(),
+                "sample rate {sample_rate:?} should be rejected"
+            );
+        }
+
+        assert!(BufferConfig::from_host(48_000.0, None, 0, ProcessMode::Realtime).is_none());
+        assert!(BufferConfig::from_host(48_000.0, Some(513), 512, ProcessMode::Realtime).is_none());
     }
 }

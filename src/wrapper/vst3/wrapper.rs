@@ -8,7 +8,8 @@ use phaselith_vst3_sys::vst::{
     IComponent, IEditController, IEventList, IMidiMapping, INoteExpressionController,
     IParamValueQueue, IParameterChanges, IProcessContextRequirements, IUnitInfo,
     LegacyMidiCCOutEvent, NoteExpressionTypeInfo, NoteExpressionValueDescription, NoteOffEvent,
-    NoteOnEvent, ParameterFlags, PolyPressureEvent, ProgramListInfo, TChar, UnitInfo,
+    NoteOnEvent, ParameterFlags, PolyPressureEvent, ProcessSetup, ProgramListInfo,
+    SymbolicSampleSizes, TChar, UnitInfo,
 };
 use phaselith_vst3_sys::VST3;
 use std::borrow::Borrow;
@@ -39,6 +40,21 @@ use crate::wrapper::util::{clamp_input_event_timing, clamp_output_event_timing, 
 
 // Alias needed for the VST3 attribute macro
 use phaselith_vst3_sys as vst3_com;
+
+fn buffer_config_from_process_setup(setup: &ProcessSetup) -> Option<BufferConfig> {
+    if setup.symbolic_sample_size != SymbolicSampleSizes::kSample32 as i32 {
+        return None;
+    }
+    let process_mode = match setup.process_mode {
+        n if n == ProcessModes::kRealtime as i32 => ProcessMode::Realtime,
+        n if n == ProcessModes::kPrefetch as i32 => ProcessMode::Buffered,
+        n if n == ProcessModes::kOffline as i32 => ProcessMode::Offline,
+        _ => return None,
+    };
+    let max_buffer_size = u32::try_from(setup.max_samples_per_block).ok()?;
+
+    BufferConfig::from_host(setup.sample_rate, None, max_buffer_size, process_mode)
+}
 
 #[VST3(implements(
     IComponent,
@@ -868,31 +884,18 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
     ) -> tresult {
         check_null_ptr!(setup);
 
-        // There's no special handling for offline processing at the moment
         let setup = &*setup;
-        nih_debug_assert_eq!(
-            setup.symbolic_sample_size,
-            phaselith_vst3_sys::vst::SymbolicSampleSizes::kSample32 as i32
-        );
-
-        // This is needed when activating the plugin and when restoring state
-        self.inner.current_buffer_config.store(Some(BufferConfig {
-            sample_rate: setup.sample_rate as f32,
-            min_buffer_size: None,
-            max_buffer_size: setup.max_samples_per_block as u32,
-            process_mode: self.inner.current_process_mode.load(),
-        }));
-
-        let mode = match setup.process_mode {
-            n if n == ProcessModes::kRealtime as i32 => ProcessMode::Realtime,
-            n if n == ProcessModes::kPrefetch as i32 => ProcessMode::Buffered,
-            n if n == ProcessModes::kOffline as i32 => ProcessMode::Offline,
-            n => {
-                nih_debug_assert_failure!("Unknown rendering mode '{}', defaulting to realtime", n);
-                ProcessMode::Realtime
-            }
+        let Some(buffer_config) = buffer_config_from_process_setup(setup) else {
+            return kInvalidArgument;
         };
-        self.inner.current_process_mode.store(mode);
+
+        // This is needed when activating the plugin and when restoring state.
+        // Store the mode represented by the same validated setup rather than
+        // copying the previous mode into `BufferConfig` first.
+        self.inner
+            .current_process_mode
+            .store(buffer_config.process_mode);
+        self.inner.current_buffer_config.store(Some(buffer_config));
 
         // Initializing the plugin happens in `IAudioProcessor::set_active()` because the host may
         // still change the channel layouts at this point
@@ -1896,5 +1899,57 @@ impl<P: Vst3Plugin> IUnitInfo for Wrapper<P> {
         _data: SharedVstPtr<dyn IBStream>,
     ) -> tresult {
         kInvalidArgument
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        buffer_config_from_process_setup, ProcessMode, ProcessModes, ProcessSetup,
+        SymbolicSampleSizes,
+    };
+
+    fn process_setup(process_mode: i32) -> ProcessSetup {
+        ProcessSetup {
+            process_mode,
+            symbolic_sample_size: SymbolicSampleSizes::kSample32 as i32,
+            max_samples_per_block: 512,
+            sample_rate: 48_000.0,
+        }
+    }
+
+    #[test]
+    fn process_setup_preserves_each_valid_mode() {
+        for (raw, expected) in [
+            (ProcessModes::kRealtime as i32, ProcessMode::Realtime),
+            (ProcessModes::kPrefetch as i32, ProcessMode::Buffered),
+            (ProcessModes::kOffline as i32, ProcessMode::Offline),
+        ] {
+            assert_eq!(
+                buffer_config_from_process_setup(&process_setup(raw))
+                    .map(|config| config.process_mode),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn process_setup_rejects_invalid_fields() {
+        let mut setup = process_setup(ProcessModes::kRealtime as i32);
+        setup.symbolic_sample_size = SymbolicSampleSizes::kSample64 as i32;
+        assert!(buffer_config_from_process_setup(&setup).is_none());
+
+        setup = process_setup(i32::MAX);
+        assert!(buffer_config_from_process_setup(&setup).is_none());
+
+        setup = process_setup(ProcessModes::kRealtime as i32);
+        setup.max_samples_per_block = 0;
+        assert!(buffer_config_from_process_setup(&setup).is_none());
+        setup.max_samples_per_block = -1;
+        assert!(buffer_config_from_process_setup(&setup).is_none());
+
+        setup = process_setup(ProcessModes::kRealtime as i32);
+        setup.sample_rate = f64::NAN;
+        assert!(buffer_config_from_process_setup(&setup).is_none());
     }
 }
