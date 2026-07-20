@@ -423,6 +423,26 @@ impl<P: ClapPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
     }
 }
 
+/// Visit event queue indices in order until the visitor requests a split before the current event.
+///
+/// Returning the event index together with the absolute sample index keeps resumption stable: the
+/// next pass starts at the same event and handles it once `current_sample_idx` reaches that sample.
+#[inline]
+fn visit_event_indices_until_split(
+    resume_from_event_idx: usize,
+    num_events: u32,
+    mut visit_event: impl FnMut(u32) -> Option<usize>,
+) -> Option<(usize, usize)> {
+    let start_idx = u32::try_from(resume_from_event_idx).ok()?;
+    for event_idx in start_idx..num_events {
+        if let Some(sample_idx) = visit_event(event_idx) {
+            return Some((sample_idx, event_idx as usize));
+        }
+    }
+
+    None
+}
+
 impl<P: ClapPlugin> Wrapper<P> {
     /// # Safety
     ///
@@ -938,26 +958,25 @@ impl<P: ClapPlugin> Wrapper<P> {
             return None;
         }
 
-        let start_idx = resume_from_event_idx as u32;
-        for event_idx in start_idx..num_events {
+        visit_event_indices_until_split(resume_from_event_idx, num_events, |event_idx| unsafe {
             let event: *const clap_event_header = clap_call! { in_=>get(in_, event_idx) };
 
             // Stop before every matching future event, including the first event in the queue. On
             // the resumed pass the event is at `current_sample_idx`, so it will be handled normally.
             if (*event).time > current_sample_idx as u32 && stop_predicate(event) {
-                return Some(((*event).time as usize, event_idx as usize));
+                return Some((*event).time as usize);
             }
 
             self.handle_in_event(
                 event,
                 &mut input_events,
-                Some(transport_info),
+                Some(&mut *transport_info),
                 current_sample_idx,
                 total_buffer_len,
             );
-        }
 
-        None
+            None
+        })
     }
 
     /// Write the unflushed parameter changes to the host's output event queue. The sample index is
@@ -3215,5 +3234,83 @@ unsafe fn query_host_extension<T>(
         Some(ClapPtr::new(extension_ptr as *const T))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visit_event_indices_until_split;
+
+    #[test]
+    fn event_queue_iteration_stops_before_lone_first_future_event() {
+        let event_times = [137_usize];
+        let mut handled = Vec::new();
+        let split = visit_event_indices_until_split(0, event_times.len() as u32, |event_idx| {
+            let sample_idx = event_times[event_idx as usize];
+            if sample_idx > 0 {
+                Some(sample_idx)
+            } else {
+                handled.push(event_idx);
+                None
+            }
+        });
+
+        assert_eq!(split, Some((137, 0)));
+        assert!(handled.is_empty());
+    }
+
+    #[test]
+    fn event_queue_iteration_handles_split_event_on_resumed_pass() {
+        let event_times = [137_usize];
+        let mut handled = Vec::new();
+        let split = visit_event_indices_until_split(0, event_times.len() as u32, |event_idx| {
+            let sample_idx = event_times[event_idx as usize];
+            if sample_idx > 137 {
+                Some(sample_idx)
+            } else {
+                handled.push(event_idx);
+                None
+            }
+        });
+
+        assert_eq!(split, None);
+        assert_eq!(handled, [0]);
+    }
+
+    #[test]
+    fn event_queue_iteration_preserves_prior_events_and_resume_index() {
+        let event_times = [0_usize, 65, 137, 200];
+        let split_events = [false, false, true, true];
+        let mut handled = Vec::new();
+        let first_split =
+            visit_event_indices_until_split(0, event_times.len() as u32, |event_idx| {
+                let index = event_idx as usize;
+                let sample_idx = event_times[index];
+                if sample_idx > 0 && split_events[index] {
+                    Some(sample_idx)
+                } else {
+                    handled.push(event_idx);
+                    None
+                }
+            });
+
+        assert_eq!(first_split, Some((137, 2)));
+        assert_eq!(handled, [0, 1]);
+
+        handled.clear();
+        let second_split =
+            visit_event_indices_until_split(2, event_times.len() as u32, |event_idx| {
+                let index = event_idx as usize;
+                let sample_idx = event_times[index];
+                if sample_idx > 137 && split_events[index] {
+                    Some(sample_idx)
+                } else {
+                    handled.push(event_idx);
+                    None
+                }
+            });
+
+        assert_eq!(second_split, Some((200, 3)));
+        assert_eq!(handled, [2]);
     }
 }
