@@ -75,11 +75,7 @@ pub fn main() -> Result<()> {
 /// contain the command name, so you should always skip at least one argument from
 /// `std::env::args()` before passing it to this function.
 pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>) -> Result<()> {
-    chdir_workspace_root()?;
-    let cargo_metadata = cargo_metadata::MetadataCommand::new()
-        .manifest_path("./Cargo.toml")
-        .exec()
-        .context("Could not parse `cargo-metadata`")?;
+    let cargo_metadata = chdir_workspace_root_with_metadata()?;
     let target_dir = cargo_metadata.target_directory.as_std_path();
 
     let mut args = args.into_iter();
@@ -150,12 +146,31 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
     }
 }
 
-/// Change the current directory into the Cargo workspace's root.
-///
-/// This is using a heuristic to find the workspace root. It considers all ancestor directories of
-/// either `CARGO_MANIFEST_DIR` or the current directory, and finds the leftmost one containing a
-/// `Cargo.toml` file.
-pub fn chdir_workspace_root() -> Result<()> {
+fn workspace_metadata_for_project(project_dir: &Path) -> Result<cargo_metadata::Metadata> {
+    let manifest_path = project_dir
+        .ancestors()
+        .map(|directory| directory.join("Cargo.toml"))
+        .find(|manifest_path| manifest_path.is_file())
+        .with_context(|| {
+            format!(
+                "Could not find a 'Cargo.toml' file in '{}' or any of its parent directories",
+                project_dir.display()
+            )
+        })?;
+
+    cargo_metadata::MetadataCommand::new()
+        .manifest_path(&manifest_path)
+        .no_deps()
+        .exec()
+        .with_context(|| {
+            format!(
+                "Could not resolve the Cargo workspace for '{}'",
+                manifest_path.display()
+            )
+        })
+}
+
+fn chdir_workspace_root_with_metadata() -> Result<cargo_metadata::Metadata> {
     // This is either the directory of the xtask binary when using `nih_plug_xtask` normally, or any
     // random project when using it through `cargo nih-plug`.
     let project_dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -166,21 +181,22 @@ pub fn chdir_workspace_root() -> Result<()> {
              found",
         )?;
 
-    let workspace_root = project_dir
-        .ancestors()
-        .filter(|dir| dir.join("Cargo.toml").exists())
-        // The ancestors are ordered starting from `project_dir` going up to the filesystem root. So
-        // this is the leftmost matching ancestor.
-        .last()
-        .with_context(|| {
-            format!(
-                "Could not find a 'Cargo.toml' file in '{}' or any of its parent directories",
-                project_dir.display()
-            )
-        })?;
+    let cargo_metadata = workspace_metadata_for_project(&project_dir)?;
+    let workspace_root = cargo_metadata.workspace_root.as_std_path();
 
     std::env::set_current_dir(workspace_root)
-        .context("Could not change to workspace root directory")
+        .context("Could not change to workspace root directory")?;
+
+    Ok(cargo_metadata)
+}
+
+/// Change the current directory into Cargo's authoritative workspace root.
+///
+/// Resolving the closest manifest through Cargo metadata is important for nested workspaces. An
+/// ancestor scan that selects the outermost `Cargo.toml` can otherwise escape an intentionally
+/// nested workspace and run the build against an unrelated package graph.
+pub fn chdir_workspace_root() -> Result<()> {
+    chdir_workspace_root_with_metadata().map(|_| ())
 }
 
 /// Build one or more packages using the provided `cargo build` arguments. This should be called
@@ -820,5 +836,69 @@ pub fn maybe_codesign(bundle_home: &Path, target: CompilationTarget) {
             "WARNING: Could not self-sign '{}', it may fail to run depending on the environment",
             bundle_home.display()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_metadata_for_project;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Fixture(PathBuf);
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cargo_metadata_keeps_an_excluded_nested_workspace_independent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let fixture_root = std::env::temp_dir().join(format!(
+            "nih-plug-xtask-nested-workspace-{}-{nonce}",
+            std::process::id()
+        ));
+        let _fixture = Fixture(fixture_root.clone());
+        let outer_root = fixture_root.join("outer");
+        let inner_root = outer_root.join("inner");
+        let xtask_root = inner_root.join("xtask");
+        fs::create_dir_all(xtask_root.join("src")).expect("create nested workspace fixture");
+
+        fs::write(
+            outer_root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = []\nexclude = [\"inner\"]\n",
+        )
+        .expect("write outer workspace manifest");
+        fs::write(
+            inner_root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"xtask\"]\n",
+        )
+        .expect("write inner workspace manifest");
+        fs::write(
+            xtask_root.join("Cargo.toml"),
+            "[package]\nname = \"fixture-xtask\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write fixture package manifest");
+        fs::write(xtask_root.join("src/main.rs"), "fn main() {}\n")
+            .expect("write fixture package source");
+
+        let metadata =
+            workspace_metadata_for_project(&xtask_root).expect("resolve nested workspace metadata");
+        assert_eq!(
+            metadata
+                .workspace_root
+                .as_std_path()
+                .canonicalize()
+                .expect("canonical metadata workspace root"),
+            inner_root
+                .canonicalize()
+                .expect("canonical fixture workspace root")
+        );
     }
 }
