@@ -1893,6 +1893,9 @@ impl<P: ClapPlugin> Wrapper<P> {
         ) else {
             return false;
         };
+        if !P::accepts_buffer_config(&buffer_config) {
+            return false;
+        }
 
         // Before initializing the plugin, make sure all smoothers are set the the default values
         for param in wrapper.param_by_hash.values() {

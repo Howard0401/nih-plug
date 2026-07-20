@@ -282,6 +282,10 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
             })
             .map(|editor| Arc::new(Mutex::new(editor)));
 
+        if !P::accepts_buffer_config(&wrapper.buffer_config) {
+            return Err(WrapperError::InitializationFailed);
+        }
+
         // Before initializing the plugin, make sure all smoothers are set the the default values
         for param in wrapper.param_id_to_ptr.values() {
             unsafe { param.update_smoother(wrapper.buffer_config.sample_rate, true) };

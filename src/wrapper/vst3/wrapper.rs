@@ -888,6 +888,9 @@ impl<P: Vst3Plugin> IAudioProcessor for Wrapper<P> {
         let Some(buffer_config) = buffer_config_from_process_setup(setup) else {
             return kInvalidArgument;
         };
+        if !P::accepts_buffer_config(&buffer_config) {
+            return kInvalidArgument;
+        }
 
         // This is needed when activating the plugin and when restoring state.
         // Store the mode represented by the same validated setup rather than
@@ -1905,9 +1908,63 @@ impl<P: Vst3Plugin> IUnitInfo for Wrapper<P> {
 #[cfg(test)]
 mod tests {
     use super::{
-        buffer_config_from_process_setup, ProcessMode, ProcessModes, ProcessSetup,
-        SymbolicSampleSizes,
+        buffer_config_from_process_setup, kInvalidArgument, kResultOk, IAudioProcessor,
+        ProcessMode, ProcessModes, ProcessSetup, SymbolicSampleSizes, Wrapper,
     };
+    use crate::params::internals::ParamPtr;
+    use crate::prelude::{
+        AudioIOLayout, AuxiliaryBuffers, Buffer, BufferConfig, Params, Plugin, ProcessContext,
+        ProcessStatus, Vst3Plugin, Vst3SubCategory,
+    };
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct AdmissionParams {}
+
+    unsafe impl Params for AdmissionParams {
+        fn param_map(&self) -> Vec<(String, ParamPtr, String)> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct AdmissionPlugin {
+        params: Arc<AdmissionParams>,
+    }
+
+    impl Plugin for AdmissionPlugin {
+        const NAME: &'static str = "Admission Test";
+        const VENDOR: &'static str = "Framework Tests";
+        const URL: &'static str = "https://example.invalid";
+        const EMAIL: &'static str = "tests@example.invalid";
+        const VERSION: &'static str = "0.0.0";
+        const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[];
+
+        type SysExMessage = ();
+        type BackgroundTask = ();
+
+        fn params(&self) -> Arc<dyn Params> {
+            self.params.clone()
+        }
+
+        fn accepts_buffer_config(buffer_config: &BufferConfig) -> bool {
+            buffer_config.max_buffer_size <= 512
+        }
+
+        fn process(
+            &mut self,
+            _buffer: &mut Buffer,
+            _aux: &mut AuxiliaryBuffers,
+            _context: &mut impl ProcessContext<Self>,
+        ) -> ProcessStatus {
+            ProcessStatus::Normal
+        }
+    }
+
+    impl Vst3Plugin for AdmissionPlugin {
+        const VST3_CLASS_ID: [u8; 16] = *b"AdmissionConfig!";
+        const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
+    }
 
     fn process_setup(process_mode: i32) -> ProcessSetup {
         ProcessSetup {
@@ -1951,5 +2008,24 @@ mod tests {
         setup = process_setup(ProcessModes::kRealtime as i32);
         setup.sample_rate = f64::NAN;
         assert!(buffer_config_from_process_setup(&setup).is_none());
+    }
+
+    #[test]
+    fn plugin_admission_rejects_before_vst3_setup_state_is_replaced() {
+        let wrapper = Wrapper::<AdmissionPlugin>::new();
+        let accepted = process_setup(ProcessModes::kRealtime as i32);
+        assert_eq!(
+            unsafe { IAudioProcessor::setup_processing(&*wrapper, &accepted) },
+            kResultOk
+        );
+        let accepted_state = wrapper.inner.current_buffer_config.load();
+
+        let mut rejected = accepted;
+        rejected.max_samples_per_block = 513;
+        assert_eq!(
+            unsafe { IAudioProcessor::setup_processing(&*wrapper, &rejected) },
+            kInvalidArgument
+        );
+        assert_eq!(wrapper.inner.current_buffer_config.load(), accepted_state);
     }
 }

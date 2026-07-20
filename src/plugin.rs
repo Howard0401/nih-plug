@@ -182,6 +182,18 @@ pub trait Plugin: Default + Send + 'static {
     // The following functions follow the lifetime of the plugin.
     //
 
+    /// Perform a side-effect-free admission check for a host-provided buffer
+    /// configuration. Format wrappers call this before committing accepted
+    /// setup state so a later [`initialize()`][Self::initialize()] call cannot
+    /// turn a previously successful host setup into an activation failure.
+    ///
+    /// This must not allocate, mutate plugin state, or perform initialization.
+    /// [`initialize()`][Self::initialize()] should still validate the same
+    /// invariants before allocating as a defense-in-depth check.
+    fn accepts_buffer_config(buffer_config: &BufferConfig) -> bool {
+        true
+    }
+
     /// Initialize the plugin for the given audio IO configuration. From this point onwards the
     /// audio IO layouts and the buffer sizes are fixed until this function is called again.
     ///
