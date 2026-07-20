@@ -933,15 +933,21 @@ impl<P: ClapPlugin> Wrapper<P> {
         let mut input_events = self.input_events.borrow_mut();
         input_events.clear();
 
-        // To achieve this, we'll always read one event ahead
         let num_events = clap_call! { in_=>size(in_) };
         if num_events == 0 {
             return None;
         }
 
         let start_idx = resume_from_event_idx as u32;
-        let mut event: *const clap_event_header = clap_call! { in_=>get(in_, start_idx) };
-        for next_event_idx in (start_idx + 1)..num_events {
+        for event_idx in start_idx..num_events {
+            let event: *const clap_event_header = clap_call! { in_=>get(in_, event_idx) };
+
+            // Stop before every matching future event, including the first event in the queue. On
+            // the resumed pass the event is at `current_sample_idx`, so it will be handled normally.
+            if (*event).time > current_sample_idx as u32 && stop_predicate(event) {
+                return Some(((*event).time as usize, event_idx as usize));
+            }
+
             self.handle_in_event(
                 event,
                 &mut input_events,
@@ -949,25 +955,7 @@ impl<P: ClapPlugin> Wrapper<P> {
                 current_sample_idx,
                 total_buffer_len,
             );
-
-            // Stop just before the next parameter change or transport information event at a sample
-            // after the current sample
-            let next_event: *const clap_event_header = clap_call! { in_=>get(in_, next_event_idx) };
-            if (*next_event).time > current_sample_idx as u32 && stop_predicate(next_event) {
-                return Some(((*next_event).time as usize, next_event_idx as usize));
-            }
-
-            event = next_event;
         }
-
-        // Don't forget about the last event
-        self.handle_in_event(
-            event,
-            &mut input_events,
-            Some(transport_info),
-            current_sample_idx,
-            total_buffer_len,
-        );
 
         None
     }
